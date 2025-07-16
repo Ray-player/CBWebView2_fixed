@@ -6,7 +6,7 @@
 
 UCBWebView2Widget::UCBWebView2Widget(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
-	, URL(TEXT("https://cn.bing.com/?mkt=zh-CN&mkt=zh-CN"))
+	, URL(TEXT(""))
 	, MousePenetrationOpacity(0.0f)
     , BackgroundColor(FColor(255, 255, 255, 255)), bShowAddressBar(false),bShowControls(false)
 {

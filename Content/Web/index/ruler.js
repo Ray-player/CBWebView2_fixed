@@ -93,10 +93,10 @@ function getScaledElementPositions(classNames) {
 
 // 发送元素位置信息(关键函数，决定UE上前端页面的点击范围)
 function sendElementPositions(classNames) {
+
+    const positions = getScaledElementPositions(classNames);
     console.log("分辨率w"+window.innerWidth);
     console.log("分辨率h"+window.innerHeight);
-    //console.log("子类数组：" + elements);
-    const positions = getScaledElementPositions(classNames);
     console.log("位置信息:"+positions);
     window.chrome.webview.postMessage({
         type: "webPosition",
@@ -107,9 +107,13 @@ function sendElementPositions(classNames) {
 }
 
 // UECall函数，测试用
-function UECall(messageData) {
-    console.log("UECall:", messageData);
-    ShowMessageInBox(messageData);
+function UECall() {
+    const inputElement = document.getElementById("textInput");
+    const message = "获取到的输入框值:"+inputElement.value;
+    //显示输入框值到前端
+    ShowMessageInBox(message);
+    //返回消息给UE
+    return message;
 }
 
 //其他功能函数
@@ -118,9 +122,12 @@ function buttonCall() {
     const inputElement = document.getElementById("textInput");
     if (inputElement) {
         const inputText = inputElement.value;
-        console.log("输入的文本是:", inputText);
+        const rulerRight = document.querySelector(".ruler-right");
+        const sendMes={ type: "inputText", text: inputText }
+        // 将 messageData 显示在 .ruler-left 元素内
+        rulerRight.textContent = `"将要发送给UE:"+${JSON.stringify(sendMes)}`;
         // 发送到 UE
-        window.chrome.webview.postMessage({ type: "inputText", text: inputText });
+        window.chrome.webview.postMessage(sendMes);
     } else {
         console.error("未找到输入框");
     }
@@ -129,8 +136,9 @@ function ShowMessageInBox(messageData) {
     const rulerLeft = document.querySelector(".ruler-left");
     if (rulerLeft) {
         // 将 messageData 显示在 .ruler-left 元素内
-        rulerLeft.textContent = `接收到的消息: ${JSON.stringify(messageData)}`;
+        rulerLeft.textContent = `${JSON.stringify(messageData)}`;
     } else {
         console.error("未找到元素");
     }
+    //return rulerLeft.textContent;
 }

@@ -9,7 +9,7 @@ class CBWEBVIEW2_API SCBWebView2:public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS(SCBWebView2)
-		: _URL(TEXT("https://cn.bing.com/?mkt=zh-CN"))
+		: _URL(TEXT(""))
 		,_Color(FColor(255,255,255,255))
 		, _ShowTouchArea(false)
 		,_ShowAddressBar(false)
