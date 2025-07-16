@@ -5,7 +5,7 @@
 #include "CBWebView2Widget.generated.h"
 class SCBWebView2;
 
-
+//
 
 UCLASS()
 class CBWEBVIEW2_API UCBWebView2Widget: public UWidget
@@ -28,7 +28,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="WebView2")
 	FString URL;
 	/**鼠标穿透的透明度阈值,功能待实现*/
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearence")
+	//UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearence")
+	UPROPERTY()
 	float MousePenetrationOpacity;
 	/**背景颜色，不可半透明，但可以背景透明*/
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearence")
