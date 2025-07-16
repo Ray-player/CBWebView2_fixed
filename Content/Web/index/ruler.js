@@ -2,7 +2,7 @@
 const designWidth = 1920;
 const designHeight = 1080;
 let currentScale = 1;
-//默认能够交互的元素类名数组
+//默认能够交互的元素类名数组,如果有增加的类名，使用push方法添加
 const elements = getChildClassNamesByParent("main");
 function main() {
     /*
