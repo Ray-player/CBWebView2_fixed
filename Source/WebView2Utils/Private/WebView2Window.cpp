@@ -230,6 +230,7 @@ HRESULT FWebView2Window::CreateControllerWithOptions()
                     HRESULT result,
                     ICoreWebView2CompositionController* compositionController) -> HRESULT
                 {
+					//todo 5.2控制器未获取
                 	CompositionController=compositionController;
                      Microsoft::WRL::ComPtr<ICoreWebView2Controller> controlle;
                      	CompositionController.As(&controlle);
