@@ -2,12 +2,12 @@
 const designWidth = 1920;
 const designHeight = 1080;
 let currentScale = 1;
+//默认能够交互的元素类名数组
 const elements = getChildClassNamesByParent("main");
 function main() {
-    console.log("分辨率w"+window.innerWidth);
-    console.log("分辨率h"+window.innerHeight);
-    console.log("子类数组：" + elements);
-
+    /*
+    UE消息传递方法：window.chrome.webview.postMessage
+    */
     setTimeout(() => {
         sendElementPositions(elements);
     }, 100);
@@ -15,11 +15,11 @@ function main() {
     // 初始缩放
     //updateScale();
     // 窗口大小改变时重新缩放
-    //window.addEventListener('resize', updateScale);
+    //window.addEventListener('resize', sendElementPositions(elements));
 }
 main();
 
-//更新缩放比
+/*已弃用：更新缩放比
 function updateScale() {
     const windowWidth = window.innerWidth;
     const windowHeight = window.innerHeight;
@@ -47,7 +47,7 @@ function updateScale() {
         sendElementPositions(elements);
     }, 100);
 }
-
+*/
 /**
  * 根据父容器类名获取其直接子元素的类名数组
  * @param {string} parentClassName - 父容器类名（如 'main'）
@@ -91,10 +91,13 @@ function getScaledElementPositions(classNames) {
     }).filter(Boolean); // 过滤掉 null 值
 }
 
-// 发送元素位置信息
+// 发送元素位置信息(关键函数，决定UE上前端页面的点击范围)
 function sendElementPositions(classNames) {
+    console.log("分辨率w"+window.innerWidth);
+    console.log("分辨率h"+window.innerHeight);
+    //console.log("子类数组：" + elements);
     const positions = getScaledElementPositions(classNames);
-    console.log(positions);
+    console.log("位置信息:"+positions);
     window.chrome.webview.postMessage({
         type: "webPosition",
         position: positions,
@@ -103,7 +106,7 @@ function sendElementPositions(classNames) {
     });
 }
 
-// 修改UECall函数
+// UECall函数，测试用
 function UECall(messageData) {
     console.log("UECall:", messageData);
     ShowMessageInBox(messageData);
@@ -128,6 +131,6 @@ function ShowMessageInBox(messageData) {
         // 将 messageData 显示在 .ruler-left 元素内
         rulerLeft.textContent = `接收到的消息: ${JSON.stringify(messageData)}`;
     } else {
-        console.error("未找到 .ruler-left 元素");
+        console.error("未找到元素");
     }
 }

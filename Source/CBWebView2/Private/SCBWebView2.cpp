@@ -13,6 +13,7 @@
 #include "Widgets/Images/SImage.h"
 #include "Brushes/SlateColorBrush.h"
 #include "Components/SlateWrapperTypes.h"
+#include "Misc/CoreMiscDefines.h"
 
 
 #define LOCTEXT_NAMESPACE "CBWebView2"
@@ -167,24 +168,35 @@ void SCBWebView2::Construct(const FArguments& InArgs, TSharedRef<SWindow> InPare
 					float WebHeight=.0f;
 					JsonObject->TryGetNumberField(TEXT("resolutionW"), WebWidth);
 					JsonObject->TryGetNumberField(TEXT("resolutionH"), WebHeight);
+					// 获取PositionOverlay的实际尺寸
+					FVector2D OverlaySize = PositionOverlay->GetCachedGeometry().GetLocalSize();
+					UE_LOG(LogTemp,Warning, TEXT("FixedSacale: %f  WebViewSize: %f %f"), FixSacale,OverlaySize.X, OverlaySize.Y);
 					if (JsonObject->TryGetArrayField(TEXT("position"), Positions))
 					{
 						// 清除现有的位置标记和区域数据
 						PositionOverlay->ClearChildren();
 						Images.Empty();
+						// 计算缩放比例
+						const float ScaleX = OverlaySize.X / WebWidth;
+						const float ScaleY = OverlaySize.Y / WebHeight;
 						for (const TSharedPtr<FJsonValue>& PosValue : *Positions)
 						{
 							const TSharedPtr<FJsonObject> PosObj = PosValue->AsObject();
 							if (PosObj.IsValid())
 							{
 								// 提取坐标和尺寸
-								float X = PosObj->GetNumberField(TEXT("x"))/FixSacale;
-								float Y = PosObj->GetNumberField(TEXT("y"))/FixSacale;
-								float Width = PosObj->GetNumberField(TEXT("width"))/FixSacale;
-								float Height = PosObj->HasField(TEXT("high")) ? 
-									PosObj->GetNumberField(TEXT("high"))/FixSacale : 
-									PosObj->GetNumberField(TEXT("height"))/FixSacale;
-		
+								float OriginalX = PosObj->GetNumberField(TEXT("x"));
+								float OriginalY = PosObj->GetNumberField(TEXT("y"));
+								float OriginalWidth = PosObj->GetNumberField(TEXT("width"));
+								float OriginalHeight = PosObj->HasField(TEXT("high")) ? 
+									PosObj->GetNumberField(TEXT("high")) : 
+									PosObj->GetNumberField(TEXT("height"));
+								// 转换为适应PositionOverlay的坐标和尺寸
+								float X = OriginalX * ScaleX ;
+								float Y = OriginalY * ScaleY ;
+								float Width = OriginalWidth * ScaleX ;
+								float Height = OriginalHeight * ScaleY ;
+
 								// 创建位置标记 (视觉效果)
 								TSharedPtr<SImage> NewImage;
 								TSharedPtr<SBox> PositionBox = 
