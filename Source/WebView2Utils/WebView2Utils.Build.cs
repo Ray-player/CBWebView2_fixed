@@ -12,6 +12,8 @@ public class WebView2Utils : ModuleRules
         CppStandard = CppStandardVersion.Cpp20;
         
         PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+        /*bUsePrecompiled = true;跨需要优先编译此构建文件,请将另外两个build文件中这两条注释取消,来优先编译此构建*/
+        //PrecompileForTargets = PrecompileTargetsType.None;
         
         PublicSystemLibraries.AddRange(new string[] { "Dcomp.lib",});
         

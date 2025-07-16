@@ -7,7 +7,8 @@ public class CBWebView2 : ModuleRules
 	public CBWebView2(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-		
+		//bUsePrecompiled = true;
+        //PrecompileForTargets = PrecompileTargetsType.None;
 		
 		PublicIncludePaths.AddRange(
 			new string[] {

@@ -15,7 +15,8 @@ public class WebView2 : ModuleRules
     public WebView2(ReadOnlyTargetRules Target) : base(Target)
     {
         Type = ModuleType.External;
-        
+        //bUsePrecompiled = true;
+        //PrecompileForTargets = PrecompileTargetsType.None;
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {
             PublicSystemIncludePaths.Add(Path.Combine(ModuleDirectory,ViewVersion,"include"));

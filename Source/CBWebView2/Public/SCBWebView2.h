@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "CoreMinimal.h"
 #include "WebView2Window.h"
+#include "Widgets/Input/SEditableTextBox.h"
 
 class SConstraintCanvas;
 DECLARE_DELEGATE_OneParam(FWebView2ScriptCallbackNative, const FString& /*Data*/)
