@@ -163,6 +163,10 @@ void SCBWebView2::Construct(const FArguments& InArgs, TSharedRef<SWindow> InPare
 				
 				if (JsonObject->TryGetStringField(TEXT("type"), Type) && Type.Equals("webPosition"))
 				{
+					float WebWidth=.0f;
+					float WebHeight=.0f;
+					JsonObject->TryGetNumberField(TEXT("resolutionW"), WebWidth);
+					JsonObject->TryGetNumberField(TEXT("resolutionH"), WebHeight);
 					if (JsonObject->TryGetArrayField(TEXT("position"), Positions))
 					{
 						// 清除现有的位置标记和区域数据
@@ -180,7 +184,7 @@ void SCBWebView2::Construct(const FArguments& InArgs, TSharedRef<SWindow> InPare
 								float Height = PosObj->HasField(TEXT("high")) ? 
 									PosObj->GetNumberField(TEXT("high"))/FixSacale : 
 									PosObj->GetNumberField(TEXT("height"))/FixSacale;
-
+		
 								// 创建位置标记 (视觉效果)
 								TSharedPtr<SImage> NewImage;
 								TSharedPtr<SBox> PositionBox = 
