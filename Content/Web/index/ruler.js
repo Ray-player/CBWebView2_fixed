@@ -125,7 +125,7 @@ function buttonCall() {
         const rulerRight = document.querySelector(".ruler-right");
         const sendMes={ type: "inputText", text: inputText }
         // 将 messageData 显示在 .ruler-left 元素内
-        rulerRight.textContent = `"将要发送给UE:"+${JSON.stringify(sendMes)}`;
+        rulerRight.textContent = `将要发送给UE: ${JSON.stringify(sendMes)}`;
         // 发送到 UE
         window.chrome.webview.postMessage(sendMes);
     } else {
