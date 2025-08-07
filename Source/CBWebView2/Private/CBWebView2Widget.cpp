@@ -101,6 +101,23 @@ void UCBWebView2Widget::ExecuteScript(const FString& Script, FWebView2ScriptCall
 	}
 }
 
+void UCBWebView2Widget::ExecuteScriptFunc(const FString& Function, const FString& Param,
+	FWebView2ScriptCallback Callback) const
+{
+	const FString& Script = Function + "(" + Param + ")";
+	if(CBWebView2)
+	{
+		CBWebView2->ExecuteScript(Script,FWebView2ScriptCallbackNative::CreateLambda([Callback](const FString& Data)
+		{
+			if(Callback.IsBound())
+			{
+				//UE_LOG(LogTemp,Warning,TEXT("%s"),*Data);
+				Callback.Execute(Data);
+			}
+		}));
+	}
+}
+
 void UCBWebView2Widget::LoadURL(const FString InURL)
 {
 	if(CBWebView2)

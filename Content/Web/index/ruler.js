@@ -107,7 +107,12 @@ function sendElementPositions(classNames) {
 }
 
 // UECall函数，测试用
-function UECall() {
+function UECall(param) {
+      // 如果param是字符串，直接返回
+    if (typeof param === 'string') {
+        ShowMessageInBox(param);
+        return param;
+    }
     const inputElement = document.getElementById("textInput");
     const message = "获取到的输入框值:"+inputElement.value;
     //显示输入框值到前端

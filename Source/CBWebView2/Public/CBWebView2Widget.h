@@ -75,6 +75,9 @@ public:
 	/**执行前端脚本*/
 	UFUNCTION(BlueprintCallable, Category="WebView2")
 	void ExecuteScript(const FString& Script,FWebView2ScriptCallback Callback) const;
+	/**执行前端脚本(方法,传值)*/
+	UFUNCTION(BlueprintCallable, Category="WebView2")
+	void ExecuteScriptFunc(const FString& Function,const FString& Param,FWebView2ScriptCallback Callback) const;
 
 	/**加载网页*/
 	UFUNCTION(BlueprintCallable, Category="WebView2")
