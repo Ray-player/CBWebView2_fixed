@@ -5,8 +5,9 @@
 CBWebView2是一个基于Microsoft WebView2技术的Unreal Engine插件，允许在游戏或应用中嵌入Web内容。该插件提供了在UE界面中显示网页、与网页交互以及控制WebView2浏览器实例的功能。
 
 插件名称：CBWebView2 fixed
-版本：2.0
+插件版本：2.1
 支持平台：Windows 64位 (Win64)
+UE5版本：5.2-5.7(蓝图基于5.5,其他版本请参考最小实现)  
 
 ## 源代码目录结构
 
@@ -104,8 +105,10 @@ Source/
 
 1.增加初始创建webview窗口事件(OnCreatedWebViewWidget)，用于代替控件中的Construct事件，使LoadURL无延迟加载  
 2.新增控件蓝图WBP_TestWebViewFile,更好地展示暴露给蓝图的功能  
-3.重新编写前端示例index.html，并将关键js代码提取到ruler.js  
-4.更改页面穿透功能，配合前端使用类名标记需要输入响应的区域，并且增加了页面的缩放匹配功能  
+3.(26.4更新)更新更多的前端网页示例  
+4.(26.4更新)添加网页下载相关事件回调,可对接UE5下载功能  
+5.(26.4更新)使用js脚本(transparency_check.js)检测网页穿透,动态调整鼠标输入应用在网页还是UE5内部  
+6.(26.4更新)增加网页输入全拦截变量(InputOnlyOnWeb)以适配web端三维场景  
 
 ## 注意事项
 
@@ -113,3 +116,6 @@ Source/
 - 目前仅支持Windows 64位平台
 - 需要安装WebView2运行时环境(Edge浏览器包含此环境)
 
+## 最小使用示例
+![bluer0](/Resources/ck_000.png)  
+![bluer1](/Resources/ck_001.png)  

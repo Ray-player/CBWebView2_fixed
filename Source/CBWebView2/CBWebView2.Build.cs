@@ -1,63 +1,33 @@
-// Copyright 2025-Present Xiao Lan fei. All Rights Reserved.
-
 using UnrealBuildTool;
 
+// CBWebView2 是插件对外暴露的 UMG / Slate 模块。
+// 这里仅声明依赖关系，不承载原生 WebView2 集成细节。
 public class CBWebView2 : ModuleRules
 {
 	public CBWebView2(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-		//bUsePrecompiled = true;
-        //PrecompileForTargets = PrecompileTargetsType.None;
-		
-		PublicIncludePaths.AddRange(
-			new string[] {
-				// ... add public include paths required here ...
-			}
-			);
-				
-		
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				// ... add other private include paths required here ...
-			}
-			);
-			
-		
+		// 使用显式或共享 PCH，保持与 UE 常规模块一致。
+		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+
+		// 对外暴露给本模块头文件使用的依赖。
 		PublicDependencyModuleNames.AddRange(
-			new string[]
+			new[]
 			{
-				"Core","WebView2", "WebView2Utils", "UMG"
-			}
-			);
-			
-		
+				"Core",
+				"UMG",
+				"WebView2Utils"
+			});
+
+		// 仅在模块内部实现中使用的依赖。
 		PrivateDependencyModuleNames.AddRange(
-			new string[]
+			new[]
 			{
 				"CoreUObject",
 				"Engine",
 				"Slate",
 				"SlateCore",
-				"UMG",
-				"Engine",
 				"InputCore",
-				"RHI",
-				"Json", 
-				"Renderer",
-				"RenderCore"
-				// ... add private dependencies that you statically link with here ...	
-			}
-			);
-		
-		
-		DynamicallyLoadedModuleNames.AddRange(
-			new string[]
-			{
-				// ... add any modules that your module loads dynamically here ...
-			}
-			);
-		
-		bEnableUndefinedIdentifierWarnings = false;
+				"ApplicationCore"
+			});
 	}
 }

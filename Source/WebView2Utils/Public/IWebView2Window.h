@@ -1,61 +1,48 @@
-﻿#pragma once
+#pragma once
 
-#include "Windows/WindowsHWrapper.h"
-#include "Windows/AllowWindowsPlatformTypes.h"
-#include "Windows/AllowWindowsPlatformAtomics.h"
+#include "CoreMinimal.h"
 
-
-#include <dcomp.h>
-
-
-
-#include "Windows/HideWindowsPlatformAtomics.h"
-#include "Windows/HideWindowsPlatformTypes.h"
-
-
-enum class EWebView2DocumentState
+/** 当前文档的加载状态。 */
+enum class ECBWebView2DocumentState : uint8
 {
-	Completed,
-	Error,
+	NoDocument,
 	Loading,
-	NoDocument
+	Completed,
+	Error
 };
 
+/**
+ * WebView 原生窗口抽象接口。
+ *
+ * 这一层用于隔离 Slate / UMG 和具体 WebView2 宿主实现。
+ */
 class IWebView2Window
 {
 public:
 	virtual ~IWebView2Window() = default;
-	/**加载网页*/ 
-	virtual void LoadURL(const FString URL) = 0;
 
-	/*** 如果浏览器可以向前导航则返回 true。*/
-	//virtual bool CanGoForward() const = 0;
-	/**前进*/
+	/** 导航控制。 */
+	virtual void LoadURL(const FString& InUrl) = 0;
 	virtual void GoForward() const = 0;
-	/**后退*/
 	virtual void GoBack() const = 0;
-
-	/** 如果浏览器可以向后导航则返回 true*/
-	//virtual bool CanGoBack() const = 0;
-	
-	/**重新加载*/
-	virtual void ReLoad() const = 0;
-	/**停止加载*/
+	virtual void Reload() const = 0;
 	virtual void Stop() const = 0;
-	/**设置webview大小*/
-	virtual void SetBounds(RECT Rect) = 0;
-	/**设置webview大小*/
-	virtual void SetBounds(POINT Offset, POINT Size) = 0;
-	
-	/**获取webview大小*/
-	virtual RECT GetBounds() const = 0;
-	/**设置可见性*/
-	virtual void SetVisible(ESlateVisibility InVisibility) = 0;
-	/**获取可见性*/
-	virtual ESlateVisibility  GetVisible() const = 0;
-	/**禁用鼠标*/
 
-	/** 获取当前文档的加载状态。 */
-	virtual EWebView2DocumentState GetDocumentLoadingState() const = 0;
-	
+	/** 布局与可见性控制。 */
+	virtual void SetBounds(const RECT& InRect) = 0;
+	virtual void SetBounds(const POINT& InOffset, const POINT& InSize) = 0;
+	virtual RECT GetBounds() const = 0;
+
+	virtual void SetVisible(ESlateVisibility InVisibility) = 0;
+	virtual ESlateVisibility GetVisible() const = 0;
+
+	/** 当前文档加载状态。 */
+	virtual ECBWebView2DocumentState GetDocumentLoadingState() const = 0;
+
+	/** 输入焦点与鼠标/键盘消息转发。 */
+	virtual void MoveFocus(bool bFocus) = 0;
+	virtual void SendMouseButton(const FVector2D& Point, bool bIsLeft, bool bIsDown) = 0;
+	virtual void SendMouseMove(const FVector2D& Point) = 0;
+	virtual void SendMouseWheel(const FVector2D& Point, float Delta) = 0;
+	virtual void SendKeyboardMessage(uint32 Msg, uint64 WParam, int64 LParam) = 0;
 };

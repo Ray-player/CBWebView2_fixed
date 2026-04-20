@@ -1,224 +1,192 @@
-// Copyright 2025-Present Xiao Lan fei. All Rights Reserved.
-
 #pragma once
 
 #include "CoreMinimal.h"
-#include "WebView2Types.h"
 #include "Engine/DeveloperSettings.h"
 #include "WebView2Settings.generated.h"
 
+struct FPropertyChangedEvent;
 
-UENUM(BlueprintType)
-enum class EWebView2Mode:uint8
-{
-	WINDOWED,
-	VISUAL_DCOMP,
-	TARGET_DCOMP,
-	VISUAL_WINCOMP
-};
-USTRUCT(Blueprintable)
-struct WEBVIEW2UTILS_API FWebView2EnvironmentOptions
-{
-	GENERATED_BODY()
-	/**
-	 *输入用于 WebView 的语言，或留空以恢复默认值。
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	FString Language;
-
-	/**
-	 *WebView 请求对用户数据文件夹的独占访问权限。
-	 *若true 将为所有 webview 关闭后创建的新 WebView 请求对用户数据文件夹的独占访问权限。
-	 *若false将不会为所有 webview 关闭后创建的新 WebView 请求对用户数据文件夹的独占访问权限。
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	bool bExclusiveUserDataFolderAccess;
-
-	/**
-	 * 是否用于在 WebView 中使用 Azure Active Directory （AAD） 和个人 Microsoft 帐户 （MSA） 资源启用单一登录
-	 * ture为使用aad为单一登陆
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	bool bAADSSOEnabled;
-
-	/**
-	 * Windows 是否会将崩溃数据发送到 Microsoft 终端节点
-	 * ture则发送
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	bool bCustomCrashReportingEnabled;
-
-	/**
-	 * 用于在 WebView2 中启用/禁用跟踪预防功能
-	 * 如果应用仅在已知安全的内容中呈现 WebView2，则可以将此属性设置为 false 以禁用跟踪防护功能。
-	 * 在创建环境时禁用此功能还可以通过跳过相关代码来提高运行时性能
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	bool bTrackingPreventionEnabled;
-	
-	FWebView2EnvironmentOptions()
-		:Language(TEXT("zh-cn"))
-		,bExclusiveUserDataFolderAccess(false)
-		,bAADSSOEnabled(false)
-		,bCustomCrashReportingEnabled(false)
-		,bTrackingPreventionEnabled(false)
-	{
-	}
-};
-
-
-
-/***
+/**
+ * WebView2 的宿主模式。
  *
- * https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2controlleroptions?view=webview2-1.0.2792.45
+ * 第一阶段优先保证 Windowed 与 VisualWinComp 可用；
+ * DComp 相关模式会保留接口，但允许逐步完善。
  */
+UENUM(BlueprintType)
+enum class ECBWebView2Mode : uint8
+{
+	Windowed UMETA(DisplayName = "窗口模式"),
+	VisualWinComp UMETA(DisplayName = "WinComp 可视树模式"),
+	VisualDComp UMETA(DisplayName = "DComp 可视树模式"),
+	TargetDComp UMETA(DisplayName = "DComp Target 模式")
+};
+
+/** WebView2 环境级设置。 */
 USTRUCT(BlueprintType)
-struct WEBVIEW2UTILS_API FWebViewCreateOption
+struct WEBVIEW2UTILS_API FCBWebView2EnvironmentOptions
 {
 	GENERATED_BODY()
 
-	/** 用于指定配置文件名称，该名称只允许包含以下 ASCII 字符
-	* 它的最大长度为 64 个字符，不包括 null 终止符。它是不区分大小写的 ASCII。
-	* 字母字符：A-Z 和 A-Z
-	* 数字字符：0-9
-	* 和 '#'， '@'， '$'， '（'， '）'， '+'， '-'， '_'， '~'， '.'， ' ' （空格）。
-	* 注意：文本不得以句点 '.' 或 ' ' （空格） 结尾。而且，尽管允许使用大写字母，但它们会被视为小写字母，因为配置文件名称将映射到磁盘上的实际配置文件目录路径，并且 Windows 文件系统以不区分大小写的方式处理路径名称。
+	/** WebView 使用的语言，例如 zh-CN。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "环境")
+	FString Language = TEXT("zh-CN");
+
+	/** 是否启用 AAD / MSA 单点登录。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "环境")
+	bool bEnableSingleSignOn = false;
+
+	/** 是否要求用户数据目录的独占访问。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "环境")
+	bool bExclusiveUserDataFolderAccess = false;
+
+	/** 是否启用自定义崩溃上报。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "环境")
+	bool bCustomCrashReporting = false;
+
+	/** 是否启用跟踪防护。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "环境")
+	bool bTrackingPrevention = true;
+
+	/** 是否允许浏览器扩展。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "环境")
+	bool bEnableBrowserExtensions = true;
+
+	/**
+	 * 额外浏览器启动参数。
+	 *
+	 * 每个数组元素表示一个完整参数，例如：
+	 * --allow-running-insecure-content
+	 * --disable-web-security
+	 *
+	 * 这些参数在 WebView2 Environment 创建时一次性生效；
+	 * 修改后需要重启编辑器，或至少销毁并重建所有 WebView 实例。
 	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	FString  Profile;
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "环境", meta = (ConfigRestartRequired = true, TitleProperty = "{Item}"))
+	TArray<FString> AdditionalBrowserArguments;
+};
 
-	/**用于启用/禁用 InPrivate 模式。*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bInPrivate;
+/** 控制器创建时使用的选项。 */
+USTRUCT(BlueprintType)
+struct WEBVIEW2UTILS_API FCBWebView2ControllerOptions
+{
+	GENERATED_BODY()
 
-	/**下载路径*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
+	/** Profile 名称，可为空。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "控制器")
+	FString ProfileName;
+
+	/** 是否启用 InPrivate 模式。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "控制器")
+	bool bInPrivate = false;
+
+	/** 下载目录，可为空。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "控制器")
 	FString DownloadPath;
 
-	/**默认区域设置*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
+	/** 脚本区域设置，可为空。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "控制器")
 	FString ScriptLocale;
 
-	/**默认区域设置是否使用操作系统区域*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bUseOSRegion;
-	
-	FWebViewCreateOption()
-		:bInPrivate(false)
-		,bUseOSRegion(false)
-	{
-	}
+	/** 是否直接使用操作系统区域设置。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "控制器")
+	bool bUseOSRegion = false;
 
-	FWebViewCreateOption(const FWebViewCreateOption& Option)
-	{
-		Profile = Option.Profile;
-		bInPrivate = Option.bInPrivate;
-		DownloadPath = Option.DownloadPath;
-		ScriptLocale = Option.ScriptLocale;
-		bUseOSRegion = Option.bUseOSRegion;
-	}
+	/** 是否允许宿主先处理输入后再交给 WebView。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "控制器")
+	bool bAllowHostInputProcessing = true;
+};
+
+/** 常用 WebView 功能开关。 */
+USTRUCT(BlueprintType)
+struct WEBVIEW2UTILS_API FCBWebView2FeatureSettings
+{
+	GENERATED_BODY()
+
+	/** 是否启用网页默认右键菜单。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableContextMenus = false;
+
+	/** 是否允许网页弹出 alert / confirm / prompt 等脚本对话框。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableScriptDialogs = true;
+
+	/** 是否允许打开开发者工具。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableDevTools = true;
+
+	/** 是否允许宿主向网页注入 Host Object。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bAllowHostObjects = true;
+
+	/** 是否启用 WebView2 内置错误页。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableBuiltInErrorPage = true;
+
+	/** 是否允许页面执行 JavaScript。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableScript = true;
+
+	/** 是否显示浏览器状态栏。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableStatusBar = true;
+
+	/** 是否启用网页与宿主之间的 WebMessage 通信。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableWebMessage = true;
+
+	/** 是否允许用户缩放网页内容。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bEnableZoomControl = true;
+
+	/** 是否将当前 WebView 默认静音。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "功能")
+	bool bMuted = false;
 };
 
 /**
- * https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2settings?view=webview2-1.0.2849.39
- * 定义启用、禁用或修改 WebView 功能的属性
+ * 插件项目设置入口。
+ *
+ * 所有公开配置都统一放在这里，便于项目侧通过编辑器面板管理。
  */
-USTRUCT(BlueprintType)
-struct WEBVIEW2UTILS_API FCoreWebView2Settings
-{
-	GENERATED_BODY()
-
-	/**用于防止在 WebView 中向用户显示默认上下文菜单(右键菜单)*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bDefaultContextMenusEnabled;
-
-	/**如果设置为 true，则 WebView2 不会呈现默认的 JavaScript 对话框 （特别是 JavaScript 警报、确认、提示函数和事件） 显示的对话框。
-	 *相反，如果使用 设置事件处理程序，则 WebView 会发送一个事件，其中包含对话框的所有信息，并允许主机应用程序显示自定义 UI
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bDefaultScriptDialogsEnabled;
-
-	/**控制用户是否能够使用上下文菜单或键盘快捷方式打开 DevTools 窗口*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bDevToolsEnabled;
-	
-	/**用于控制是否可以从 WebView 中的页面访问主机对象*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bHostObjectsAllowed;
-
-	/**用于禁用导航失败和渲染过程失败的内置错误页面,禁用后，当发生相关错误时，将显示一个空白页面*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bBuiltInErrorPageEnabled;
-
-	/**控制是否在 WebView 的所有未来导航中启用运行 JavaScript*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bScriptEnabled;
-
-	/**控制是否显示状态栏
-	 * 状态栏通常显示在 WebView 的左下角，当用户将鼠标悬停在链接上时，
-	 * 会显示链接的 URI 等内容以及其他信息。默认值为 .状态栏 UI 可由 Web 内容更改，不应被视为安全
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bStatusBarEnabled;
-
-	/**如果设置为true ，则允许使用 、 和 message 事件从 主机到 WebView 的顶级 HTML 文档的通信*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bWebMessageEnabled;
-
-	/**如果设置为true ，则允许使用 、 和 message 事件从 主机到 WebView 的顶级 HTML 文档的通信*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	bool bZoomControlEnabled;
-	
-	FCoreWebView2Settings()
-		:bDefaultContextMenusEnabled(false)
-		,bDefaultScriptDialogsEnabled(true)
-		,bDevToolsEnabled(true)
-		,bHostObjectsAllowed(true)
-		,bBuiltInErrorPageEnabled(true)
-		,bScriptEnabled(true)
-		,bStatusBarEnabled(true)
-		,bWebMessageEnabled(true)
-		,bZoomControlEnabled(true)
-	{
-		
-	}	
-		
-	
-		
-	
-};
-
-UCLASS(Config = "WebView2",DefaultConfig)
+UCLASS(Config = CBWebView2, DefaultConfig, meta = (DisplayName = "CB WebView2"))
 class WEBVIEW2UTILS_API UWebView2Settings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
 public:
-	UWebView2Settings(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
-	// UDeveloperSettings Interface
+	UWebView2Settings();
+
 	virtual FName GetCategoryName() const override;
 
-public:
-	UFUNCTION(BlueprintPure, Category = "WebView2",DisplayName = "GetWebView2Settings")
-	static UWebView2Settings* Get();
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
 
-public:
-	/**不同显示模式，修改后需重启
-	* todo VISUAL_DCOMP,TARGET_DCOMP,这两个没做完后续开发
-	 */
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2")
-	EWebView2Mode WebView2Mode;
+	UFUNCTION(BlueprintPure, Category = "CBWebView2")
+	static const UWebView2Settings* Get();
 
-	/**是否静音*/
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Audio")
-	bool bMuted;
-	
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	FWebView2EnvironmentOptions EnvironmentOptions;
+	/** WebView 默认运行模式。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "基础", meta = (ConfigRestartRequired = true))
+	ECBWebView2Mode Mode = ECBWebView2Mode::VisualWinComp;
 
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	FWebViewCreateOption WebViewCreateOption;
+	/** 环境级选项。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "基础", meta = (ConfigRestartRequired = true))
+	FCBWebView2EnvironmentOptions Environment;
 
-	UPROPERTY(BlueprintReadOnly, Config,EditAnywhere, Category = "WebView2|Options")
-	FCoreWebView2Settings CoreWebView2Settings;
+	/** 控制器级选项。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "基础", meta = (ConfigRestartRequired = true))
+	FCBWebView2ControllerOptions Controller;
+
+	/** 功能开关。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "基础")
+	FCBWebView2FeatureSettings Features;
+
+	/** 默认背景色。A 为 0 时表示透明背景。 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "外观")
+	FColor DefaultBackgroundColor = FColor(255, 255, 255, 255);
+
+private:
+#if WITH_EDITOR
+	bool DoesChangeRequireEditorRestart(const FPropertyChangedEvent& PropertyChangedEvent) const;
+#endif
 };

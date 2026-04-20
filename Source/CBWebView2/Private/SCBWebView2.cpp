@@ -1,122 +1,108 @@
-﻿#include "SCBWebView2.h"
+#include "SCBWebView2.h"
 
 #include "WebView2CompositionHost.h"
-#include "WebView2Window.h"
 #include "WebView2Manager.h"
 #include "WebView2Subsystem.h"
-#include "Widgets/Images/SThrobber.h"
-#include "Widgets/Layout/SConstraintCanvas.h"
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Images/SImage.h"
+
 #include "Brushes/SlateColorBrush.h"
 #include "Components/SlateWrapperTypes.h"
-#include "Misc/CoreMiscDefines.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Widgets/Images/SThrobber.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Text/STextBlock.h"
 
+#include "Windows/WindowsHWrapper.h"
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <winuser.h>
+#include "Windows/HideWindowsPlatformTypes.h"
 
 #define LOCTEXT_NAMESPACE "CBWebView2"
 
-SCBWebView2::SCBWebView2()
-	: bShowInitialThrobber(false), bShowAddressBar(false), bShowControls(false), MousePenetrationOpacity(0.f),UniqueId(FGuid::NewGuid())
-	  , WebViewWindowHandle(nullptr)
-	  , Handle(FReply::Unhandled())
-	  , FixSacale(1.0f)
+namespace
 {
+	// 键盘事件在部分路径下会回流到宿主窗口，这个标记用于避免递归重入。
+	bool GCBWebView2KeyReentry = false;
 }
 
-SCBWebView2::~SCBWebView2()
+void SCBWebView2::Construct(const FArguments& InArgs)
 {
-	if (WebView2Window)
-	{
-		
-		WebView2Window.Reset();
-	}
-}
+	// 先缓存 Slate 参数，再尝试创建底层原生 WebView。
+	InitialUrl = InArgs._InitialUrl;
+	CurrentUrl = InitialUrl;
+	BackgroundColor = InArgs._BackgroundColor;
+	ParentWindow = InArgs._ParentWindow;
+	bShowAddressBar = InArgs._bShowAddressBar;
+	bShowControls = InArgs._bShowControls;
+	bShowTouchArea = InArgs._bShowTouchArea;
+	bEnableTransparencyHitTest = InArgs._bEnableTransparencyHitTest;
+	bShowInitialThrobber = InArgs._bShowInitialThrobber;
+	bInputOnlyOnWeb = InArgs._bInputOnlyOnWeb;
+	OnMessageReceived = InArgs._OnMessageReceived;
+	OnNavigationCompleted = InArgs._OnNavigationCompleted;
+	OnNavigationStarting = InArgs._OnNavigationStarting;
+	OnNewWindowRequested = InArgs._OnNewWindowRequested;
+	OnDownloadStarting = InArgs._OnDownloadStarting;
+	OnDownloadUpdated = InArgs._OnDownloadUpdated;
+	OnPrintToPdfCompleted = InArgs._OnPrintToPdfCompleted;
+	OnMonitoredEvent = InArgs._OnMonitoredEvent;
+	OnWebViewCreated = InArgs._OnWebViewCreated;
+	InstanceId = FGuid::NewGuid();
 
-void SCBWebView2::Construct(const FArguments& InArgs, TSharedRef<SWindow> InParentWindowPtr)
-{
-	InitializeURL=InArgs._URL;
-	BackgroundColor=InArgs._Color;
-	OnWebView2MessageReceived=InArgs._NewOnWebView2MessageReceived;
-	OnWebView2NavigationCompleted=InArgs._NewOnWebView2NavigationCompleted;
-	OnWebView2NavigationStarting=InArgs._NewOnNavigationStarting;
-	OnWebView2NewWindowRequested=InArgs._NewOnNewWindowRequestedNactive;
-	OnWebView2CursorChangedNactive=InArgs._NewOnCursorChangedNactive;
-	//创建赋值链接
-	OnWebViewCreated=InArgs._NewOnWebViewCreated;
-	bShowAddressBar=InArgs._ShowAddressBar;
-	bShowControls=InArgs._ShowControls;
-	MousePenetrationOpacity=InArgs._SetMouseOpacity;
-	bShowTouchArea=InArgs._ShowTouchArea;
-	bShowInitialThrobber = InArgs._ShowInitialThrobber;
-	
-		ChildSlot
+	ChildSlot
 	[
+		// 这里统一搭建地址栏、控制按钮和实际 WebView 覆盖层。
 		SNew(SVerticalBox)
-		+SVerticalBox::Slot()
+		+ SVerticalBox::Slot()
 		.AutoHeight()
 		[
 			SNew(SHorizontalBox)
-			.Visibility((InArgs._ShowControls || InArgs._ShowAddressBar) ? EVisibility::Visible : EVisibility::Collapsed)
+			.Visibility((bShowAddressBar || bShowControls) ? EVisibility::Visible : EVisibility::Collapsed)
 			+ SHorizontalBox::Slot()
-			.Padding(0, 5)
 			.AutoWidth()
+			.Padding(0.0f, 5.0f)
 			[
 				SNew(SHorizontalBox)
-				.Visibility(InArgs._ShowControls ? EVisibility::Visible : EVisibility::Collapsed)
-				+SHorizontalBox::Slot()
+				.Visibility(bShowControls ? EVisibility::Visible : EVisibility::Collapsed)
+				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				[
 					SNew(SButton)
-					.Text(LOCTEXT("Back","Back"))
-					.IsEnabled(this, &SCBWebView2::CanGoBack)
-					.OnClicked(this, &SCBWebView2::OnBackClicked)
+					.Text(LOCTEXT("Back", "Back"))
+					.IsEnabled_Lambda([this]() { return bCanGoBack; })
+					.OnClicked(this, &SCBWebView2::HandleBackClicked)
 				]
-				+SHorizontalBox::Slot()
+				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				[
 					SNew(SButton)
 					.Text(LOCTEXT("Forward", "Forward"))
-					.IsEnabled(this, &SCBWebView2::CanGoForward)
-					.OnClicked(this, &SCBWebView2::OnForwardClicked)
+					.IsEnabled_Lambda([this]() { return bCanGoForward; })
+					.OnClicked(this, &SCBWebView2::HandleForwardClicked)
 				]
-				+SHorizontalBox::Slot()
+				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				[
 					SNew(SButton)
 					.Text(this, &SCBWebView2::GetReloadButtonText)
-					.OnClicked(this, &SCBWebView2::OnReloadClicked)
-				]
-				+SHorizontalBox::Slot()
-				.FillWidth(1.0f)
-				.VAlign(VAlign_Center)
-				.HAlign(HAlign_Right)
-				.Padding(5)
-				[
-					SNew(STextBlock)
-					.Visibility(InArgs._ShowAddressBar ? EVisibility::Collapsed : EVisibility::Visible )
-					.Text(this, &SCBWebView2::GetTitleText)
-					.Justification(ETextJustify::Right)
+					.OnClicked(this, &SCBWebView2::HandleReloadClicked)
 				]
 			]
-			+SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.HAlign(HAlign_Fill)
-			.Padding(5.f, 5.f)
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.Padding(5.0f)
 			[
-				// @todo: A proper addressbar widget should go here, for now we use a simple textbox.
-				SAssignNew(InputText, SEditableTextBox)
-				.Visibility(InArgs._ShowAddressBar ? EVisibility::Visible : EVisibility::Collapsed)
-				.OnTextCommitted(this, &SCBWebView2::OnUrlTextCommitted)
+				SAssignNew(AddressBarTextBox, SEditableTextBox)
+				.Visibility(bShowAddressBar ? EVisibility::Visible : EVisibility::Collapsed)
 				.Text(this, &SCBWebView2::GetAddressBarUrlText)
-				.SelectAllTextWhenFocused(true)
-				.ClearKeyboardFocusOnCommit(true)
-				.RevertTextOnEscape(true)
+				.OnTextCommitted(this, &SCBWebView2::HandleUrlCommitted)
 			]
 		]
-		+SVerticalBox::Slot()
+		+ SVerticalBox::Slot()
+		.FillHeight(1.0f)
 		[
 			SNew(SOverlay)
 			+ SOverlay::Slot()
@@ -125,546 +111,597 @@ void SCBWebView2::Construct(const FArguments& InArgs, TSharedRef<SWindow> InPare
 			[
 				SNew(SCircularThrobber)
 				.Radius(10.0f)
-				.ToolTipText(LOCTEXT("LoadingThrobberToolTip", "Loading page..."))
-				.Visibility(this, &SCBWebView2::GetLoadingThrobberVisibility)
+				.Visibility(this, &SCBWebView2::GetLoadingIndicatorVisibility)
 			]
 			+ SOverlay::Slot()
 			[
-				SAssignNew(PositionOverlay, SOverlay)
+				SAssignNew(Overlay, SOverlay)
 			]
 		]
 	];
-	
-	if(	void* Hwnd = InParentWindowPtr->GetNativeWindow()->GetOSWindowHandle())
+
+	if (TSharedPtr<SWindow> PinnedWindow = ParentWindow.Pin())
 	{
-		WebViewWindowHandle=(HWND)Hwnd;
-		WebView2Window=FWebView2Manager::GetInstance()->CreateWebview(
-			WebViewWindowHandle,
-			UniqueId,
-			InitializeURL,
-			BackgroundColor);
-
-		// 绑定WebView创建完成事件
-		WebView2Window->OnWebViewCreated.BindLambda([this,InArgs](bool bSuccess)
+		// WebView2 必须绑定到真实 HWND，因此在 Slate 构造阶段直接取宿主窗口句柄。
+		if (void* NativeHandle = PinnedWindow->GetNativeWindow()->GetOSWindowHandle())
 		{
-			OnWebViewCreated.ExecuteIfBound(bSuccess);
-		});
-		WebView2Window->OnWebView2MessageReceived.BindLambda([this,InArgs](FString Message)
-		{
-			OnWebView2MessageReceived.ExecuteIfBound(Message);
-				// 解析JSON
-			TSharedPtr<FJsonObject> JsonObject;
-			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Message);
-			
-			if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
-			{
-				// 获取"position"数组
-				const TArray<TSharedPtr<FJsonValue>>* Positions;
-				FString Type; 
-				
-				if (JsonObject->TryGetStringField(TEXT("type"), Type) && Type.Equals("webPosition"))
-				{
-					float WebWidth=.0f;
-					float WebHeight=.0f;
-					JsonObject->TryGetNumberField(TEXT("resolutionW"), WebWidth);
-					JsonObject->TryGetNumberField(TEXT("resolutionH"), WebHeight);
-					// 获取PositionOverlay的实际尺寸
-					FVector2D OverlaySize = PositionOverlay->GetCachedGeometry().GetLocalSize();
-					UE_LOG(LogTemp,Warning, TEXT("FixedSacale: %f  WebViewSize: %f %f"), FixSacale,OverlaySize.X, OverlaySize.Y);
-					if (JsonObject->TryGetArrayField(TEXT("position"), Positions))
-					{
-						// 清除现有的位置标记和区域数据
-						PositionOverlay->ClearChildren();
-						Images.Empty();
-						// 计算缩放比例
-						const float ScaleX = OverlaySize.X / WebWidth;
-						const float ScaleY = OverlaySize.Y / WebHeight;
-						for (const TSharedPtr<FJsonValue>& PosValue : *Positions)
-						{
-							const TSharedPtr<FJsonObject> PosObj = PosValue->AsObject();
-							if (PosObj.IsValid())
-							{
-								// 提取坐标和尺寸
-								float OriginalX = PosObj->GetNumberField(TEXT("x"));
-								float OriginalY = PosObj->GetNumberField(TEXT("y"));
-								float OriginalWidth = PosObj->GetNumberField(TEXT("width"));
-								float OriginalHeight = PosObj->HasField(TEXT("high")) ? 
-									PosObj->GetNumberField(TEXT("high")) : 
-									PosObj->GetNumberField(TEXT("height"));
-								// 转换为适应PositionOverlay的坐标和尺寸
-								float X = OriginalX * ScaleX ;
-								float Y = OriginalY * ScaleY ;
-								float Width = OriginalWidth * ScaleX ;
-								float Height = OriginalHeight * ScaleY ;
-
-								// 创建位置标记 (视觉效果)
-								TSharedPtr<SImage> NewImage;
-								TSharedPtr<SBox> PositionBox = 
-									SNew(SBox)
-									.WidthOverride(Width)
-									.HeightOverride(Height)
-									[
-										SAssignNew(NewImage,SImage)
-										.Image( InArgs._ShowTouchArea ? (new FSlateColorBrush(FLinearColor(1, 0, 0, 0.3))) :(new FSlateColorBrush(FLinearColor(1, 0, 0, 0))))
-									];
-
-								Images.Add(NewImage);
-								// 添加到PositionOverlay
-								PositionOverlay->AddSlot()
-									.Padding(FMargin(X, Y, 0, 0)) // 使用 Padding 设置左上角位置
-									.HAlign(HAlign_Left)
-									.VAlign(VAlign_Top)
-									[
-										PositionBox.ToSharedRef()
-									];
-								}
-							}
-						}
-					}
-
-				}
-			
-		});
-
-		WebView2Window->OnNavigationCompleted.BindLambda([this,InArgs](bool bSuccess)
-		{
-			OnWebView2NavigationCompleted.ExecuteIfBound(bSuccess);
-
-			// 清除现有的位置标记和区域数据
-			PositionOverlay->ClearChildren();
-			Images.Empty();
-			RECT Bounds=WebView2Window->GetBounds();
-			float SizeY=Bounds.bottom-Bounds.top;
-			float SizeX=Bounds.right-Bounds.left;
-			
-		// 创建位置标记
-			TSharedPtr<SImage> NewImage;
-			TSharedPtr<SBox> PositionBox = 
-				SNew(SBox)
-				[
-					SAssignNew(NewImage,SImage)
-					.Image( InArgs._ShowTouchArea ? (new FSlateColorBrush(FLinearColor(1, 0, 0, 0.3))) :(new FSlateColorBrush(FLinearColor(1, 0, 0, 0))))
-				];
-			
-			Images.Add(NewImage);
-		// 添加到PositionOverlay
-			PositionOverlay->AddSlot()
-			//.Padding(FMargin(OffsetX, OffsetY, 0, 0)) // 使用 Padding 设置左上角位置
-			.HAlign(HAlign_Fill)
-			.VAlign(VAlign_Fill)
-			[
-				PositionBox.ToSharedRef()
-			];			
-		});
-
-		WebView2Window->OnNavigationStarting.BindLambda([this](FString InURL)
-		{
-			OnWebView2NavigationStarting.ExecuteIfBound(InURL);
-
-			
-		});
-		WebView2Window->OnNewWindowRequested.BindLambda([this](FString InURL)
-		{
-			OnWebView2NewWindowRequested.ExecuteIfBound(InURL);
-		});
-
-		WebView2Window->OnCanGoBackNactive.BindLambda([this](bool bInCanGoBack)
-		{
-			bCanGoBack=bInCanGoBack;
-		});
-
-		WebView2Window->OnCanGoForwardNactive.BindLambda([this](bool bInCanGoForward)
-		{
-			bCanGoForward=bInCanGoForward;
-		});
-		WebView2Window->OnDocumentTitleChangedNactive.BindLambda([this](FString InTitile)
-		{
-			Title=InTitile;
-		});
-
-		WebView2Window->OnSourceChangedNactive.BindLambda([this](FString InURL)
-		{
-			URL=InURL;
-		});
-		
-		WebView2Window->OnCursorChangedNactive.BindLambda([this]( EMouseCursor::Type InCursor)
-		{
-			SetCursor(InCursor);
-		});
-
-		
+			WebViewWindow = FWebView2Manager::Get().CreateWebView(
+				static_cast<HWND>(NativeHandle),
+				InstanceId,
+				InitialUrl,
+				BackgroundColor,
+				bEnableTransparencyHitTest);
+			BindWebViewEvents();
+		}
 	}
 }
 
-FReply SCBWebView2::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+SCBWebView2::~SCBWebView2()
 {
-	UWebView2Subsystem* Subsystem = UWebView2Subsystem::GetWebView2Subsystem();
-
-	if(!WebView2Window)
-	{
-		return  SCompoundWidget::OnMouseButtonDown(MyGeometry, MouseEvent);
-	}
-	
-	// 直接使用 Tick 中计算好的状态
-	if (WebView2Window->bIsMouseOverPositionArea)
-	{
-		// 根据您的修改，如果在区域内，事件不被处理 (Unhandled)，允许传递
-		UE_LOG(LogTemp, Log, TEXT("Mouse button down over position area - Unhandled"));
-		// 如果您希望捕获事件，则返回 Handled
-		 return FReply::Handled(); 
-	}
-	
-	// 如果不在区域内，则调用基类默认行为
-	return SCompoundWidget::OnMouseButtonDown(MyGeometry, MouseEvent);
-}
-
-void SCBWebView2::OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
-{
-	SCompoundWidget::OnMouseEnter(MyGeometry, MouseEvent);
-	
-}
-
-void SCBWebView2::OnMouseLeave(const FPointerEvent& MouseEvent)
-{
-	SCompoundWidget::OnMouseLeave(MouseEvent);
-}
-
-bool SCBWebView2::HasKeyboardFocus() const
-{
-	return SCompoundWidget::HasKeyboardFocus();
-}
-
-void SCBWebView2::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
-{
-	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
-	
-
-	// 获取当前鼠标屏幕坐标
-	FVector2D ScreenMousePos = FSlateApplication::Get().GetCursorPos();
-	
-
-	// 遍历每个SImage
-	for (TSharedPtr<SImage> ImageWidget : Images)
-	{
-		if (!ImageWidget.IsValid())
-		{
-			continue;
-		}
-		
-		// 判断鼠标是否在这个Geometry范围内
-		if (ImageWidget->GetCachedGeometry().IsUnderLocation(ScreenMousePos))
-		{
-			if(WebView2Window)
-			{
-				WebView2Window->bIsMouseOverPositionArea = true;
-			}
-			
-			break; // 找到一个匹配区域即可退出循环
-		}else
-		{
-
-			if(WebView2Window)
-			{
-				WebView2Window->bIsMouseOverPositionArea = false;
-			}
-		}
-	}
-	
-	
-}
-
-int32 SCBWebView2::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect,
-	FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle,
-	bool bParentEnabled) const
-{
-	if (WebView2Window)
-	{
-		FixSacale=AllottedGeometry.Scale;
-		FVector2D Offset = AllottedGeometry.LocalToAbsolute(FVector2D::ZeroVector);
-		FVector2D Size = AllottedGeometry.GetDrawSize();
-
-		if(Size.X>16000.f || Size.X<0.f)
-		{
-			Size.X=100.f;
-		}
-
-		if(Size.Y>16000.f || Size.Y<0.f)
-		{
-			Size.Y=100.f;
-		}
-		
-		POINT Of;
-		Of.x = Offset.X;
-		Of.y = bShowAddressBar ||bShowControls ? Offset.Y+30*AllottedGeometry.Scale : Offset.Y;
-		POINT Si;
-		Si.x = Size.X;
-		Si.y = bShowAddressBar || bShowControls ? Size.Y-30*AllottedGeometry.Scale : Size.Y;
-		
-		WebView2Window->SetBounds(Of, Si);
-		//UE_LOG(LogTemp,Warning,TEXT("%f,%f"), Size.X, Size.Y);
-		if(WebView2Window->GetWebView2CompositionHost())
-		{
-			if(LayerId !=WebView2Window->GetLayerID())
-			{
-				WebView2Window->SetLayerID(LayerId);
-				WebView2Window->GetWebView2CompositionHost()->RefreshWebViewVisual();
-				//UE_LOG(LogTemp,Warning,TEXT("%d"),LayerId);
-			}
-		}
-		
-	}
-	
-	int32 Layer = SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
-	return Layer;
-}
-
-
-
-FVector2D SCBWebView2::ComputeDesiredSize(float) const
-{
-		if (GetVisibility() == EVisibility::Collapsed)
-		{
-			return FVector2D::ZeroVector;
-		}
-		if (WebView2Window)
-		{
-			RECT bound = WebView2Window->GetBounds();
-			return FVector2D(
-				(static_cast<float>(bound.right - bound.left)),
-				(static_cast<float>(bound.bottom - bound.top)));
-		}
-		return FVector2D::ZeroVector;
-}
-
-FCursorReply SCBWebView2::OnCursorQuery(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent) const
-{
-	return SCompoundWidget::OnCursorQuery(MyGeometry, CursorEvent);
+	BeginDestroy();
 }
 
 void SCBWebView2::BeginDestroy()
 {
-	WebView2Window->CloseWindow();
+	// 主动关闭底层窗口，确保销毁顺序可控。
+	if (WebViewWindow.IsValid())
+	{
+		WebViewWindow->CloseWindow();
+		WebViewWindow.Reset();
+	}
 }
 
-void SCBWebView2::ExecuteScript(const FString& Script, FWebView2ScriptCallbackNative ScriptCallback) const
+void SCBWebView2::ExecuteScript(const FString& Script, FOnCBWebView2ScriptCallback Callback) const
 {
-	if(WebView2Window)
+	if (WebViewWindow.IsValid())
 	{
-		WebView2Window->ExecuteScript(Script,[ScriptCallback](const FString Reslut)
+		WebViewWindow->ExecuteScript(Script, [Callback](const FString& Result)
 		{
-			if(ScriptCallback.IsBound())
+			if (Callback.IsBound())
 			{
-				ScriptCallback.Execute(Reslut);
+				Callback.Execute(Result);
 			}
 		});
 	}
 }
 
-void SCBWebView2::LoadURL(const FString InURL)
+void SCBWebView2::LoadURL(const FString& InUrl)
 {
-	if(WebView2Window)
+	CurrentUrl = InUrl;
+	if (WebViewWindow.IsValid())
 	{
-		WebView2Window->LoadURL(InURL);
-	}
-	else
-	{
-		UE_LOG(LogTemp,Warning,TEXT("WebView2Window is null"));
+		WebViewWindow->LoadURL(InUrl);
 	}
 }
 
 void SCBWebView2::GoForward() const
 {
-	if(WebView2Window)
+	if (WebViewWindow.IsValid())
 	{
-		WebView2Window->GoForward();
+		WebViewWindow->GoForward();
 	}
 }
 
 void SCBWebView2::GoBack() const
 {
-	if(WebView2Window)
+	if (WebViewWindow.IsValid())
 	{
-		WebView2Window->GoBack();
+		WebViewWindow->GoBack();
 	}
 }
 
-bool SCBWebView2::CanGoBack() const
+void SCBWebView2::Reload() const
 {
-	return bCanGoBack;
-}
-
-bool SCBWebView2::CanGoForward() const
-{
-	return bCanGoForward;
-}
-
-void SCBWebView2::ReLoad() const
-{
-	if(WebView2Window)
+	if (WebViewWindow.IsValid())
 	{
-		WebView2Window->ReLoad();
+		WebViewWindow->Reload();
 	}
 }
 
 void SCBWebView2::Stop() const
 {
-	if(WebView2Window)
+	if (WebViewWindow.IsValid())
 	{
-		WebView2Window->Stop();
+		WebViewWindow->Stop();
 	}
 }
 
-bool SCBWebView2::IsLoading() const
+void SCBWebView2::OpenDevToolsWindow() const
 {
-	if(WebView2Window)
+	if (WebViewWindow.IsValid())
 	{
-		if (WebView2Window->GetDocumentLoadingState() == EWebView2DocumentState::Loading)
-		{
-			return true;
-		}
-	}
-
-	return false;
-}
-
-void SCBWebView2::StopLoad()
-{
-	if(WebView2Window)
-	{
-		WebView2Window->Stop();
+		WebViewWindow->OpenDevToolsWindow();
 	}
 }
 
-void SCBWebView2::Reload()
+void SCBWebView2::PrintToPdf(const FString& OutputPath, bool bLandscape) const
 {
-	if(WebView2Window)
+	if (WebViewWindow.IsValid())
 	{
-		WebView2Window->ReLoad();
+		WebViewWindow->PrintToPdf(OutputPath, bLandscape);
 	}
 }
 
-FText SCBWebView2::GetTitleText() const
+void SCBWebView2::SetBackgroundColor(const FColor& InBackgroundColor)
 {
-	if (WebView2Window)
+	BackgroundColor = InBackgroundColor;
+	if (WebViewWindow.IsValid())
 	{
-		UE_LOG(LogTemp, Display, TEXT("OnDocumentTitleChangedNactive: %s"), *Title);
-		return FText::FromString(Title);
+		WebViewWindow->SetBackgroundColor(InBackgroundColor);
 	}
-    return LOCTEXT("InvalidWindow", "Browser Window is not valid/supported");
 }
 
-FText SCBWebView2::GetAddressBarUrlText() const
+void SCBWebView2::SetWebViewVisibility(ESlateVisibility InVisibility)
 {
-	if (WebView2Window.IsValid())
+	// 原生层和 Slate 层都要同步可见性，否则会出现逻辑可见但原生不可见的错位。
+	if (WebViewWindow.IsValid())
 	{
-		return FText::FromString(URL);
+		WebViewWindow->SetVisible(InVisibility);
 	}
-	return FText::GetEmpty();
-}
 
-void SCBWebView2::SetVisible(ESlateVisibility InVisibility)
-{
-	if (WebView2Window.IsValid())
-	{
-		WebView2Window->SetVisible(InVisibility);
-	}
-	TAttribute<EVisibility>  EVisib;
+	EVisibility SlateVisibility = EVisibility::Visible;
 	switch (InVisibility)
 	{
 	case ESlateVisibility::Collapsed:
-		EVisib.Set(EVisibility::Collapsed);
+		SlateVisibility = EVisibility::Collapsed;
 		break;
 	case ESlateVisibility::Hidden:
-		EVisib.Set(EVisibility::Hidden);
-		break;
-	case ESlateVisibility::Visible:
-		EVisib.Set(EVisibility::Visible);
+		SlateVisibility = EVisibility::Hidden;
 		break;
 	case ESlateVisibility::HitTestInvisible:
-		EVisib.Set(EVisibility::HitTestInvisible);
+		SlateVisibility = EVisibility::HitTestInvisible;
 		break;
 	case ESlateVisibility::SelfHitTestInvisible:
-		EVisib.Set(EVisibility::SelfHitTestInvisible);
+		SlateVisibility = EVisibility::SelfHitTestInvisible;
+		break;
+	default:
+		SlateVisibility = EVisibility::Visible;
 		break;
 	}
-	
-	SetVisibility(EVisib);
-	
+
+	SetVisibility(SlateVisibility);
 }
 
-ESlateVisibility SCBWebView2::GetVisible()
+ESlateVisibility SCBWebView2::GetWebViewVisibility() const
 {
-	if (WebView2Window.IsValid())
-	{
-		return WebView2Window->GetVisible();
-	}
-	return ESlateVisibility::Hidden;
+	return WebViewWindow.IsValid() ? WebViewWindow->GetVisible() : ESlateVisibility::Hidden;
 }
 
-FReply SCBWebView2::OnBackClicked()
+void SCBWebView2::SetInputOnlyOnWeb(bool bInputOnly)
+{
+	bInputOnlyOnWeb = bInputOnly;
+}
+
+int32 SCBWebView2::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
+{
+	if (WebViewWindow.IsValid())
+	{
+		// 利用绘制阶段拿到最终几何信息，并同步到底层原生 WebView。
+		CurrentSlateScale = AllottedGeometry.Scale;
+
+		FVector2D Offset = AllottedGeometry.LocalToAbsolute(FVector2D::ZeroVector);
+		FVector2D Size = AllottedGeometry.GetDrawSize();
+		Size.X = FMath::Clamp(Size.X, 0.0f, 16000.0f);
+		Size.Y = FMath::Clamp(Size.Y, 0.0f, 16000.0f);
+
+		POINT WindowOffset{static_cast<LONG>(Offset.X), static_cast<LONG>(Offset.Y)};
+		POINT WindowSize{static_cast<LONG>(Size.X), static_cast<LONG>(Size.Y)};
+		if (bShowAddressBar || bShowControls)
+		{
+			// 顶部工具栏占用了可视区域，需要扣掉其高度。
+			WindowOffset.y += static_cast<LONG>(30.0f * AllottedGeometry.Scale);
+			WindowSize.y -= static_cast<LONG>(30.0f * AllottedGeometry.Scale);
+		}
+
+		WebViewWindow->SetBounds(WindowOffset, WindowSize);
+
+		if (TSharedPtr<FWebView2CompositionHost> CompositionHost = WebViewWindow->GetCompositionHost())
+		{
+			// 多个 WebView 重叠时，使用 Slate LayerId 驱动原生 Visual 排序。
+			if (LayerId != WebViewWindow->GetLayerId())
+			{
+				WebViewWindow->SetLayerId(LayerId);
+				CompositionHost->RefreshVisualOrder();
+			}
+		}
+	}
+
+	return SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+}
+
+FVector2D SCBWebView2::ComputeDesiredSize(float LayoutScaleMultiplier) const
+{
+	if (GetVisibility() == EVisibility::Collapsed)
+	{
+		return FVector2D::ZeroVector;
+	}
+
+	if (WebViewWindow.IsValid())
+	{
+		const RECT Bounds = WebViewWindow->GetBounds();
+		return FVector2D(Bounds.right - Bounds.left, Bounds.bottom - Bounds.top);
+	}
+
+	return FVector2D(640.0f, 360.0f);
+}
+
+void SCBWebView2::Tick(const FGeometry& AllottedGeometry, double InCurrentTime, float InDeltaTime)
+{
+	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+}
+
+FReply SCBWebView2::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	// bInputOnlyOnWeb 为 true 时，忽略透明检测，直接处理输入
+	if (!bInputOnlyOnWeb && !bIsHoveringInteractiveContent)
+	{
+		// 当前鼠标位于透明区域时，放弃命中，让下层 UMG / WebView 继续处理。
+		return FReply::Unhandled();
+	}
+
+	if (WebViewWindow.IsValid())
+	{
+		// 命中可交互网页内容时，转发原生鼠标按下并抢占 Slate 键盘焦点。
+		const FVector2D LocalPoint = GetLocalWebViewPoint(MyGeometry, MouseEvent.GetScreenSpacePosition());
+		WebViewWindow->SendMouseButton(LocalPoint, MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton, true);
+		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+		{
+			Subsystem->SetWebViewFocused(true);
+		}
+		return FReply::Handled().CaptureMouse(SharedThis(this)).SetUserFocus(SharedThis(this), EFocusCause::Mouse);
+	}
+
+	return FReply::Unhandled();
+}
+
+FReply SCBWebView2::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (WebViewWindow.IsValid())
+	{
+		const FVector2D LocalPoint = GetLocalWebViewPoint(MyGeometry, MouseEvent.GetScreenSpacePosition());
+		WebViewWindow->SendMouseButton(LocalPoint, MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton, false);
+		return HasMouseCapture() ? FReply::Handled().ReleaseMouseCapture() : FReply::Handled();
+	}
+
+	return FReply::Unhandled();
+}
+
+FReply SCBWebView2::OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (WebViewWindow.IsValid())
+	{
+		// 即使当前区域最终不命中，也要把 move 传下去，让网页实时更新透明命中状态。
+		const FVector2D LocalPoint = GetLocalWebViewPoint(MyGeometry, MouseEvent.GetScreenSpacePosition());
+		WebViewWindow->SendMouseMove(LocalPoint);
+		// bInputOnlyOnWeb 为 true 时，始终返回 Handled，不传递给下层
+		return (bInputOnlyOnWeb || bIsHoveringInteractiveContent) ? FReply::Handled() : FReply::Unhandled();
+	}
+
+	return FReply::Unhandled();
+}
+
+FReply SCBWebView2::OnMouseWheel(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (WebViewWindow.IsValid())
+	{
+		const FVector2D LocalPoint = GetLocalWebViewPoint(MyGeometry, MouseEvent.GetScreenSpacePosition());
+		WebViewWindow->SendMouseWheel(LocalPoint, MouseEvent.GetWheelDelta());
+		return FReply::Handled();
+	}
+
+	return FReply::Unhandled();
+}
+
+FReply SCBWebView2::OnFocusReceived(const FGeometry& MyGeometry, const FFocusEvent& InFocusEvent)
+{
+	if (WebViewWindow.IsValid())
+	{
+		// Slate 获得焦点后，把真实输入焦点同步给底层 WebView。
+		SetVisibility(EVisibility::Visible);
+		WebViewWindow->MoveFocus(true);
+		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+		{
+			Subsystem->SetWebViewFocused(true);
+		}
+	}
+
+	return FReply::Handled();
+}
+
+void SCBWebView2::OnFocusLost(const FFocusEvent& InFocusEvent)
+{
+	if (WebViewWindow.IsValid())
+	{
+		// 焦点离开时通知 WebView，并把宿主 HWND 重新设为系统焦点持有者。
+		WebViewWindow->MoveFocus(false);
+
+		if (TSharedPtr<SWindow> CurrentWindow = FSlateApplication::Get().GetActiveTopLevelWindow())
+		{
+			if (CurrentWindow->GetNativeWindow().IsValid())
+			{
+				if (void* NativeHandle = CurrentWindow->GetNativeWindow()->GetOSWindowHandle())
+				{
+					::SetFocus(static_cast<HWND>(NativeHandle));
+				}
+			}
+		}
+
+		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+		{
+			Subsystem->SetWebViewFocused(false);
+		}
+	}
+
+	// bInputOnlyOnWeb 为 true 时，保持控件始终可命中，不根据透明状态切换
+	if (!bInputOnlyOnWeb)
+	{
+		SetVisibility(bIsHoveringInteractiveContent ? EVisibility::Visible : EVisibility::HitTestInvisible);
+	}
+	else
+	{
+		SetVisibility(EVisibility::Visible);
+	}
+
+	SCompoundWidget::OnFocusLost(InFocusEvent);
+}
+
+bool SCBWebView2::SupportsKeyboardFocus() const
+{
+	return true;
+}
+
+FReply SCBWebView2::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (GCBWebView2KeyReentry || !WebViewWindow.IsValid())
+	{
+		return WebViewWindow.IsValid() ? FReply::Handled() : FReply::Unhandled();
+	}
+
+	GCBWebView2KeyReentry = true;
+	// Slate 键盘事件转换成 Win32 风格消息参数，再交给宿主窗口转发给 WebView2。
+	const uint32 KeyCode = InKeyEvent.GetKeyCode();
+	const uint32 ScanCode = MapVirtualKey(KeyCode, 0);
+	uint64 LParam = 1 | (static_cast<uint64>(ScanCode) << 16);
+	if (InKeyEvent.IsRepeat())
+	{
+		LParam |= 0x40000000;
+	}
+
+	WebViewWindow->SendKeyboardMessage(WM_KEYDOWN, KeyCode, static_cast<int64>(LParam));
+	GCBWebView2KeyReentry = false;
+	return FReply::Handled();
+}
+
+FReply SCBWebView2::OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (GCBWebView2KeyReentry || !WebViewWindow.IsValid())
+	{
+		return WebViewWindow.IsValid() ? FReply::Handled() : FReply::Unhandled();
+	}
+
+	GCBWebView2KeyReentry = true;
+	const uint32 KeyCode = InKeyEvent.GetKeyCode();
+	const uint32 ScanCode = MapVirtualKey(KeyCode, 0);
+	const uint64 LParam = 1 | (static_cast<uint64>(ScanCode) << 16) | 0xC0000000;
+	WebViewWindow->SendKeyboardMessage(WM_KEYUP, KeyCode, static_cast<int64>(LParam));
+	GCBWebView2KeyReentry = false;
+	return FReply::Handled();
+}
+
+FReply SCBWebView2::OnKeyChar(const FGeometry& MyGeometry, const FCharacterEvent& InCharacterEvent)
+{
+	if (GCBWebView2KeyReentry || !WebViewWindow.IsValid())
+	{
+		return WebViewWindow.IsValid() ? FReply::Handled() : FReply::Unhandled();
+	}
+
+	GCBWebView2KeyReentry = true;
+	WebViewWindow->SendKeyboardMessage(WM_CHAR, InCharacterEvent.GetCharacter(), 1);
+	GCBWebView2KeyReentry = false;
+	return FReply::Handled();
+}
+
+FReply SCBWebView2::HandleBackClicked()
 {
 	GoBack();
 	return FReply::Handled();
 }
 
-FReply SCBWebView2::OnForwardClicked()
+FReply SCBWebView2::HandleForwardClicked()
 {
 	GoForward();
 	return FReply::Handled();
 }
 
-FText SCBWebView2::GetReloadButtonText() const
+FReply SCBWebView2::HandleReloadClicked()
 {
-	static FText ReloadText = LOCTEXT("Reload", "Reload");
-	static FText StopText = LOCTEXT("StopText", "Stop");
-
-	if (WebView2Window.IsValid())
+	if (WebViewWindow.IsValid() && WebViewWindow->GetDocumentLoadingState() == ECBWebView2DocumentState::Loading)
 	{
-		if (IsLoading())
-		{
-			return StopText;
-		}
-	}
-	return ReloadText;
-}
-
-FReply SCBWebView2::OnReloadClicked()
-{
-	if (IsLoading())
-	{
-		StopLoad();
+		Stop();
 	}
 	else
 	{
 		Reload();
 	}
+
 	return FReply::Handled();
 }
 
-void SCBWebView2::OnUrlTextCommitted(const FText& NewText, ETextCommit::Type CommitType)
+void SCBWebView2::HandleUrlCommitted(const FText& NewText, ETextCommit::Type CommitType)
 {
-	if(CommitType == ETextCommit::OnEnter)
+	if (CommitType == ETextCommit::OnEnter)
 	{
 		LoadURL(NewText.ToString());
 	}
 }
 
-EVisibility SCBWebView2::GetLoadingThrobberVisibility() const
+FText SCBWebView2::GetReloadButtonText() const
 {
-	if (bShowInitialThrobber && !WebView2Window->IsInitialized())
-	{
-		return EVisibility::Visible;
-	}
-	return EVisibility::Hidden;
+	return (WebViewWindow.IsValid() && WebViewWindow->GetDocumentLoadingState() == ECBWebView2DocumentState::Loading)
+		? LOCTEXT("Stop", "Stop")
+		: LOCTEXT("Reload", "Reload");
 }
 
-
-void SCBWebView2::SetBackgroundColor(FColor InBackgroundColor)
+FText SCBWebView2::GetTitleText() const
 {
-	if (WebView2Window)
+	return FText::FromString(CurrentTitle);
+}
+
+FText SCBWebView2::GetAddressBarUrlText() const
+{
+	return FText::FromString(CurrentUrl);
+}
+
+EVisibility SCBWebView2::GetLoadingIndicatorVisibility() const
+{
+	return (bShowInitialThrobber && WebViewWindow.IsValid() && !WebViewWindow->IsInitialized())
+		? EVisibility::Visible
+		: EVisibility::Hidden;
+}
+
+FVector2D SCBWebView2::GetLocalWebViewPoint(const FGeometry& MyGeometry, const FVector2D& ScreenSpacePosition) const
+{
+	FVector2D LocalPoint = MyGeometry.AbsoluteToLocal(ScreenSpacePosition);
+	if (bShowAddressBar || bShowControls)
 	{
-		WebView2Window->SetBackgroundColor(InBackgroundColor);
+		LocalPoint.Y -= 30.0f;
 	}
+
+	return LocalPoint * MyGeometry.Scale;
+}
+
+void SCBWebView2::BindWebViewEvents()
+{
+	if (!WebViewWindow.IsValid())
+	{
+		return;
+	}
+
+	// 这里把原生层事件统一桥接到 Slate 内部状态与外部委托。
+	WebViewWindow->OnMessageReceived.BindSP(this, &SCBWebView2::HandleMessageFromWeb);
+	WebViewWindow->OnNavigationCompleted.BindLambda([this](bool bSuccess)
+	{
+		OnNavigationCompleted.ExecuteIfBound(bSuccess);
+	});
+
+	WebViewWindow->OnNavigationStarting.BindLambda([this](const FString& Url)
+	{
+		CurrentUrl = Url;
+		OnNavigationStarting.ExecuteIfBound(Url);
+	});
+
+	WebViewWindow->OnNewWindowRequested.BindLambda([this](const FString& Url)
+	{
+		OnNewWindowRequested.ExecuteIfBound(Url);
+	});
+
+	WebViewWindow->OnDownloadStarting.BindLambda([this](const FWebView2DownloadInfo& DownloadInfo)
+	{
+		OnDownloadStarting.ExecuteIfBound(DownloadInfo);
+	});
+
+	WebViewWindow->OnDownloadUpdated.BindLambda([this](const FWebView2DownloadInfo& DownloadInfo)
+	{
+		OnDownloadUpdated.ExecuteIfBound(DownloadInfo);
+	});
+
+	WebViewWindow->OnPrintToPdfCompleted.BindLambda([this](bool bSuccess, const FString& OutputPath)
+	{
+		OnPrintToPdfCompleted.ExecuteIfBound(bSuccess, OutputPath);
+	});
+
+	WebViewWindow->OnMonitoredEvent.BindLambda([this](const FCBWebView2MonitoredEvent& EventInfo)
+	{
+		OnMonitoredEvent.ExecuteIfBound(EventInfo);
+	});
+
+	WebViewWindow->OnInputActivationRequested.BindLambda([this]()
+	{
+		// 当原生 WinComp 路由确认当前 WebView 应接管输入时，主动拉起 Slate 键盘焦点。
+		if (!FSlateApplication::IsInitialized())
+		{
+			return;
+		}
+
+		FSlateApplication::Get().SetKeyboardFocus(SharedThis(this), EFocusCause::Mouse);
+		if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+		{
+			Subsystem->SetWebViewFocused(true);
+		}
+	});
+
+	WebViewWindow->OnCanGoBackChanged.BindLambda([this](bool bValue)
+	{
+		bCanGoBack = bValue;
+	});
+
+	WebViewWindow->OnCanGoForwardChanged.BindLambda([this](bool bValue)
+	{
+		bCanGoForward = bValue;
+	});
+
+	WebViewWindow->OnDocumentTitleChanged.BindLambda([this](const FString& Title)
+	{
+		CurrentTitle = Title;
+	});
+
+	WebViewWindow->OnSourceChanged.BindLambda([this](const FString& Url)
+	{
+		CurrentUrl = Url;
+	});
+
+	WebViewWindow->OnCursorChanged.BindLambda([this](EMouseCursor::Type CursorType)
+	{
+		SetCursor(CursorType);
+	});
+
+	WebViewWindow->OnWebViewCreated.BindLambda([this](bool bSuccess)
+	{
+		OnWebViewCreated.ExecuteIfBound(bSuccess);
+	});
+}
+
+void SCBWebView2::HandleMessageFromWeb(const FString& Message)
+{
+	if (Message.Contains(TEXT("IsClickable:")))
+	{
+		// bInputOnlyOnWeb 为 true 时，忽略透明检测消息，保持原有输入处理
+		if (bInputOnlyOnWeb)
+		{
+			return;
+		}
+
+		// transparency_check.js 会发送 IsClickable:0/1，表示鼠标当前位置是否命中可交互 DOM。
+			const bool bNewHoverState = Message.Contains(TEXT("1"));
+
+			if (bNewHoverState != bIsHoveringInteractiveContent)
+			{
+				UE_LOG(LogTemp, Log, TEXT("SCBWebView2 Transparency Change: Old=%d, New=%d"), bIsHoveringInteractiveContent, bNewHoverState);
+			}
+
+			bIsHoveringInteractiveContent = bNewHoverState;
+			// 网页消息只负责决定当前区域是否允许鼠标命中，
+			// 不能再拿它去覆盖真实的键盘焦点状态，否则输入焦点会在 0/1 间来回抖动。
+			if (WebViewWindow.IsValid())
+			{
+				// 将网页穿透状态同步到底层独立命中标记，
+				// 让多个独立 UMG WebView 在 WinComp 路由时按可交互性而不是纯可见性竞争命中。
+				WebViewWindow->SetHitTestEnabled(bNewHoverState);
+			}
+
+			if (!bNewHoverState)
+			{
+				if (HasMouseCapture() && FSlateApplication::IsInitialized())
+				{
+					FSlateApplication::Get().ReleaseAllPointerCapture();
+				}
+			}
+
+			SetVisibility(bNewHoverState ? EVisibility::Visible : EVisibility::HitTestInvisible);
+	}
+
+	// 无论是否为透明检测消息，都继续向上层广播，方便业务自行解析网页消息。
+	OnMessageReceived.ExecuteIfBound(Message);
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -1,21 +1,18 @@
-// Copyright 2025-Present Xiao Lan fei. All Rights Reserved.
-
 #include "CBWebView2.h"
 
-#define LOCTEXT_NAMESPACE "FCBWebView2Module"
-
 DEFINE_LOG_CATEGORY(LogCBWebView2);
+
 void FCBWebView2Module::StartupModule()
 {
-	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
+	// 当前模块本身不持有长生命周期状态。
+	// 目前模块启动阶段不主动创建任何对象。
+	// 真正的 WebView 生命周期按需由 Widget 或 Subsystem 拉起。
 }
 
 void FCBWebView2Module::ShutdownModule()
 {
-	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
-	// we call this function before unloading the module.
+	// 保持空实现，避免和子模块的析构次序产生耦合。
+	// 具体资源释放由各自模块与对象生命周期负责。
 }
 
-#undef LOCTEXT_NAMESPACE
-	
 IMPLEMENT_MODULE(FCBWebView2Module, CBWebView2)

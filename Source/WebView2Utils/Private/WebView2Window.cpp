@@ -1,490 +1,466 @@
-// Copyright 2025-Present Xiao Lan fei. All Rights Reserved.
-
-
 #include "WebView2Window.h"
 
-#include "Windows/WindowsHWrapper.h"
-#include "Windows/AllowWindowsPlatformTypes.h"
-#include "Windows/AllowWindowsPlatformAtomics.h"
-
-#include <Windows.h>
-
-#include <DispatcherQueue.h>
-#include <WinUser.h>
-#include <winrt/Windows.UI.Composition.Desktop.h>
-
-#include "Windows/HideWindowsPlatformAtomics.h"
-#include "Windows/HideWindowsPlatformTypes.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
 
 #include "WebView2CompositionHost.h"
-#include "WebView2FileComponent.h"
 #include "WebView2Log.h"
 #include "WebView2Manager.h"
 #include "WebView2Settings.h"
 #include "WebView2Subsystem.h"
-#include "Components/SlateWrapperTypes.h"
 
+#include "Interfaces/IPluginManager.h"
+#include "Misc/FileHelper.h"
 
-namespace winSystem = winrt::Windows::System;
+#include "Windows/WindowsHWrapper.h"
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <DispatcherQueue.h>
+#include <WinUser.h>
+#include <winrt/Windows.UI.Composition.Desktop.h>
+#include "Windows/HideWindowsPlatformTypes.h"
 
-FWebView2Window::FWebView2Window(HWND InHwnd, const FGuid UniqueID, const FString InInitialURL,FColor InBackgroundColor)
-	:MainWindow(InHwnd)
-	,InitialURL(InInitialURL)
-	,ID(UniqueID)
-	,BackgroundColor(InBackgroundColor)
-	,DocumentState(EWebView2DocumentState::NoDocument)
+namespace
 {
-	InitializeWebView();
-	
+	// 统一接管 COM 分配的字符串，转换成 FString 后立即释放原始内存。
+	FString TakeCoTaskMemString(LPWSTR RawString)
+	{
+		const FString Result = RawString ? FString(RawString) : FString();
+		if (RawString)
+		{
+			::CoTaskMemFree(RawString);
+		}
+		return Result;
+	}
+
+	EWebView2DownloadState ToDownloadState(const COREWEBVIEW2_DOWNLOAD_STATE InState)
+	{
+		// SDK 下载状态转为插件内部枚举，便于跨层复用。
+		switch (InState)
+		{
+		case COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED:
+			return EWebView2DownloadState::Interrupted;
+		case COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED:
+			return EWebView2DownloadState::Completed;
+		default:
+			return EWebView2DownloadState::InProgress;
+		}
+	}
+
+	FString DownloadStateToString(const EWebView2DownloadState InState)
+	{
+		switch (InState)
+		{
+		case EWebView2DownloadState::Interrupted:
+			return TEXT("Interrupted");
+		case EWebView2DownloadState::Completed:
+			return TEXT("Completed");
+		default:
+			return TEXT("InProgress");
+		}
+	}
+
+	FString PermissionKindToString(const COREWEBVIEW2_PERMISSION_KIND InPermissionKind)
+	{
+		switch (InPermissionKind)
+		{
+		case COREWEBVIEW2_PERMISSION_KIND_MICROPHONE:
+			return TEXT("Microphone");
+		case COREWEBVIEW2_PERMISSION_KIND_CAMERA:
+			return TEXT("Camera");
+		case COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION:
+			return TEXT("Geolocation");
+		case COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS:
+			return TEXT("Notifications");
+		case COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS:
+			return TEXT("OtherSensors");
+		case COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ:
+			return TEXT("ClipboardRead");
+		case COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS:
+			return TEXT("MultipleAutomaticDownloads");
+		case COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE:
+			return TEXT("FileReadWrite");
+		case COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY:
+			return TEXT("Autoplay");
+		case COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS:
+			return TEXT("LocalFonts");
+		case COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES:
+			return TEXT("MidiSystemExclusiveMessages");
+		case COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT:
+			return TEXT("WindowManagement");
+		default:
+			return TEXT("Unknown");
+		}
+	}
+
+	winrt::hstring BuildBrowserArguments(const UWebView2Settings* Settings)
+	{
+		FString Arguments = TEXT("--enable-features=ThirdPartyStoragePartitioning,PartitionedCookies");
+		if (Settings)
+		{
+			for (const FString& Entry : Settings->Environment.AdditionalBrowserArguments)
+			{
+				const FString TrimmedEntry = Entry.TrimStartAndEnd();
+				if (!TrimmedEntry.IsEmpty())
+				{
+					Arguments += TEXT(" ");
+					Arguments += TrimmedEntry;
+				}
+			}
+		}
+
+		Arguments.TrimStartAndEndInline();
+		return winrt::hstring(*Arguments);
+	}
+
+	COREWEBVIEW2_COLOR ToCoreColor(const FColor& InColor)
+	{
+		return COREWEBVIEW2_COLOR{InColor.A, InColor.R, InColor.G, InColor.B};
+	}
+
+	FString LoadTransparencyCheckScript()
+	{
+		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("CBWebView2"));
+		if (!Plugin.IsValid())
+		{
+			return FString();
+		}
+
+		FString ScriptContent;
+		const FString PrimaryScriptPath = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Extras/transparency_check.js"));
+		const FString LegacyScriptPath = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Content/Web/transparency_check.js"));
+
+		// 优先从 Extras 加载，避免示例网页目录整理时误删；旧路径仅作为兼容回退。
+		if (!FFileHelper::LoadFileToString(ScriptContent, *PrimaryScriptPath) &&
+			!FFileHelper::LoadFileToString(ScriptContent, *LegacyScriptPath))
+		{
+			UE_LOG(LogWebView2Utils, Warning, TEXT("无法加载透明穿透脚本，已尝试路径: %s ; %s"), *PrimaryScriptPath, *LegacyScriptPath);
+			return FString();
+		}
+
+		// 使用全局哨兵避免页面自己已引入脚本时重复注册监听。
+		return FString::Printf(
+			TEXT("if (!window.__cbwebview2TransparencyCheckInstalled) { window.__cbwebview2TransparencyCheckInstalled = true; %s }")
+			,
+			*ScriptContent);
+	}
+}
+
+FWebView2Window::FWebView2Window(
+	HWND InParentWindow,
+	const FGuid& InInstanceId,
+	const FString& InInitialUrl,
+	const FColor& InBackgroundColor,
+	bool bInEnableTransparencyHitTest)
+	: ParentWindow(InParentWindow)
+	, InstanceId(InInstanceId)
+	, InitialUrl(InInitialUrl)
+	, BackgroundColor(InBackgroundColor)
+	, bEnableTransparencyHitTest(bInEnableTransparencyHitTest)
+{
+	Initialize();
 }
 
 FWebView2Window::~FWebView2Window()
 {
+	Close();
 }
 
-void FWebView2Window::InitializeWebView()
+void FWebView2Window::Initialize()
 {
-	bInitialized=false;
-	Visible=ESlateVisibility::Visible;
-	DcompDevice = nullptr;
-	SetBounds(POINT(0.f,0.f),POINT(1.f,1.f));
-	UWebView2Settings* Settings=UWebView2Settings::Get();
+	// 每次初始化都先重置运行时状态，确保重建实例时没有旧状态残留。
+	bCloseRequested = false;
+	bInitialized = false;
+	Visible = ESlateVisibility::Visible;
+	bHitTestEnabled = true;
+	DocumentState = ECBWebView2DocumentState::NoDocument;
+	Bounds = {};
+	DCompDevice = nullptr;
 
-	if(Settings->WebView2Mode ==EWebView2Mode::VISUAL_DCOMP ||
-		Settings->WebView2Mode == EWebView2Mode::VISUAL_DCOMP)
+	const UWebView2Settings* Settings = UWebView2Settings::Get();
+	const ECBWebView2Mode Mode = Settings ? Settings->Mode : ECBWebView2Mode::VisualWinComp;
+
+	if (Mode == ECBWebView2Mode::VisualDComp || Mode == ECBWebView2Mode::TargetDComp)
 	{
-		HRESULT HR = DCompositionCreateDevice2(nullptr, IID_PPV_ARGS(&DcompDevice));
-		if(!SUCCEEDED(HR))
+		// DComp 模式需要显式创建合成设备。
+		const HRESULT Hr = DCompositionCreateDevice2(nullptr, IID_PPV_ARGS(&DCompDevice));
+		if (FAILED(Hr))
 		{
-			UE_LOG(LogWebView2,Error,TEXT("Create with Windowless DComp Visual Failed:"
-								 "DComp device creation failed."
-								 "Current OS may not support DComp."))
+			UE_LOG(LogWebView2Utils, Error, TEXT("创建 DComp 设备失败，HRESULT=0x%08x"), Hr);
 			return;
 		}
 	}
-	//! [CreateCoreWebView2EnvironmentWithOptions]
-	FString Args;
-	Args.Append(TEXT("-enable-features=ThirdPartyStoragePartitioning,PartitionedCookies"));
+
 	auto Options = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
-	Options->put_AdditionalBrowserArguments(*Args);
-	Options->put_AdditionalBrowserArguments(L"--autoplay-policy=no-user-gesture-required");
-	//Options->put_AdditionalBrowserArguments(L"--disable-frame-rate-limit");
-	Options->put_AllowSingleSignOnUsingOSPrimaryAccount(Settings->EnvironmentOptions.bAADSSOEnabled);
-	Options->put_ExclusiveUserDataFolderAccess(
-		Settings->EnvironmentOptions.bExclusiveUserDataFolderAccess);
-	if (!Settings->EnvironmentOptions.Language.IsEmpty())
-		Options->put_Language(*(Settings->EnvironmentOptions.Language));
-	Options->put_IsCustomCrashReportingEnabled(Settings->EnvironmentOptions.bCustomCrashReportingEnabled);
+	// 启动参数在 Environment 创建时一次性生效。
+	const winrt::hstring BrowserArguments = BuildBrowserArguments(Settings);
+	Options->put_AdditionalBrowserArguments(BrowserArguments.c_str());
 
-
-	//! [CoreWebView2CustomSchemeRegistration]
-	Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions4> options4;
-	if (Options.As(&options4) == S_OK)
+	if (Settings)
 	{
-		const WCHAR* AllowedOrigins[1] = {L"https://*.example.com"};
-		
-		auto customSchemeRegistration =
-		  Microsoft::WRL::Make<CoreWebView2CustomSchemeRegistration>(L"custom-scheme");
-		customSchemeRegistration->SetAllowedOrigins(
-			1,AllowedOrigins);
-		auto customSchemeRegistration2 =
-			Microsoft::WRL::Make<CoreWebView2CustomSchemeRegistration>(L"wv2rocks");
-		customSchemeRegistration2->put_TreatAsSecure(true);
-		customSchemeRegistration2->SetAllowedOrigins(1, AllowedOrigins);
-		customSchemeRegistration2->put_HasAuthorityComponent(true);
-		auto customSchemeRegistration3 =
-			Microsoft::WRL::Make<CoreWebView2CustomSchemeRegistration>(
-				L"custom-scheme-not-in-allowed-origins");
-		ICoreWebView2CustomSchemeRegistration* registrations[3] = {
-			customSchemeRegistration.Get(), customSchemeRegistration2.Get(),
-			customSchemeRegistration3.Get()};
-		options4->SetCustomSchemeRegistrations(
-			2, static_cast<ICoreWebView2CustomSchemeRegistration**>(registrations));
+		Options->put_AllowSingleSignOnUsingOSPrimaryAccount(Settings->Environment.bEnableSingleSignOn);
+		Options->put_ExclusiveUserDataFolderAccess(Settings->Environment.bExclusiveUserDataFolderAccess);
+		Options->put_IsCustomCrashReportingEnabled(Settings->Environment.bCustomCrashReporting);
+
+		if (!Settings->Environment.Language.IsEmpty())
+		{
+			Options->put_Language(*Settings->Environment.Language);
+		}
+
+		Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions5> Options5;
+		if (SUCCEEDED(Options.As(&Options5)))
+		{
+			Options5->put_EnableTrackingPrevention(Settings->Environment.bTrackingPrevention);
+		}
+
+		Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions6> Options6;
+		if (SUCCEEDED(Options.As(&Options6)))
+		{
+			Options6->put_AreBrowserExtensionsEnabled(Settings->Environment.bEnableBrowserExtensions);
+		}
+
+		Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions8> Options8;
+		if (SUCCEEDED(Options.As(&Options8)))
+		{
+			Options8->put_ScrollBarStyle(COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY);
+		}
 	}
 
-	//! [CoreWebView2CustomSchemeRegistration]
+	FString UserDataFolder = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("CBWebView2/UserData"));
+	// 用户数据目录统一落到 Saved 下，避免污染工程根目录。
+	FPaths::NormalizeDirectoryName(UserDataFolder);
+	IFileManager::Get().MakeDirectory(*UserDataFolder, true);
 
-	Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions5> Options5;
-	if (Options.As(&Options5) == S_OK)
-	{
-	
-		Options5->put_EnableTrackingPrevention(Settings->EnvironmentOptions.bTrackingPreventionEnabled );
-	}
-
-	Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions6> Options6;
-	if (Options.As(&Options6) == S_OK)
-	{
-		Options6->put_AreBrowserExtensionsEnabled(true);
-	}
-
-	Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions8> Options8;
-	if (Options.As(&Options8) == S_OK)
-	{
-		COREWEBVIEW2_SCROLLBAR_STYLE style = COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY;
-		Options8->put_ScrollBarStyle(style);
-	}
-
-	HRESULT Hresult = CreateCoreWebView2EnvironmentWithOptions(
-		nullptr, nullptr, Options.Get(),
+	const HRESULT Hr = CreateCoreWebView2EnvironmentWithOptions(
+		nullptr,
+		*UserDataFolder,
+		Options.Get(),
 		Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-			this, &FWebView2Window::OnCreateEnvironmentCompleted)
+			this,
+			&FWebView2Window::OnCreateEnvironmentCompleted)
 			.Get());
 
-	if (!SUCCEEDED(Hresult))
+	if (FAILED(Hr))
 	{
-		switch (Hresult)
+		UE_LOG(LogWebView2Utils, Error, TEXT("创建 WebView2 Environment 失败，HRESULT=0x%08x"), Hr);
+	}
+}
+
+bool FWebView2Window::Close(bool bCleanupUserDataFolder)
+{
+	if (bCloseRequested)
+	{
+		return true;
+	}
+
+	// 先标记关闭，再逆序解绑事件、分离可视树和释放 COM 对象。
+	bCloseRequested = true;
+
+	if (CompositionHost.IsValid())
+	{
+		CompositionHost->DetachWebView(InstanceId, WebViewVisual);
+		CompositionHost.Reset();
+	}
+
+	if (Controller)
+	{
+		if (WebView)
 		{
-		case HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND):
+			WebView->remove_WebMessageReceived(MessageReceivedToken);
+			WebView->remove_NavigationCompleted(NavigationCompletedToken);
+			WebView->remove_NavigationStarting(NavigationStartingToken);
+			WebView->remove_HistoryChanged(HistoryChangedToken);
+			WebView->remove_DocumentTitleChanged(DocumentTitleChangedToken);
+			WebView->remove_SourceChanged(SourceChangedToken);
+			if (Microsoft::WRL::ComPtr<ICoreWebView2_4> WebView4; SUCCEEDED(WebView.As(&WebView4)) && WebView4)
 			{
-				UE_LOG(LogWebView2,Error,TEXT("Couldn't find Edge WebView2 Runtime.Do you have a version installed?"));
+				WebView4->remove_DownloadStarting(DownloadStartingToken);
 			}
-			break;
-		case HRESULT_FROM_WIN32(ERROR_FILE_EXISTS):
-			{
-				UE_LOG(LogWebView2,Error,TEXT("User data folder cannot be created because a file with the same name already"));
-			}
-			break;
-		case E_ACCESSDENIED:
-			{
-				UE_LOG(LogWebView2,Error,TEXT("Unable to create user data folder, Access Denied."));
-			}
-			break;
-		case E_FAIL:
-			{
-				UE_LOG(LogWebView2,Error,TEXT("Edge runtime unable to start"));
-			}
-			break;
-		default:
-			{
-				UE_LOG(LogWebView2,Error,TEXT("Failed to create WebView2 environment"));
-			}
+			WebView->remove_PermissionRequested(PermissionRequestedToken);
 		}
-	}
-}
 
-HRESULT FWebView2Window::CreateControllerWithOptions()
-{
-	//! [CreateControllerWithOptions]
-	 Microsoft::WRL::ComPtr<ICoreWebView2Environment10> webViewEnvironment10;
-
-	WebViewEnvironment.As(&webViewEnvironment10);
-	if (!webViewEnvironment10)
-	{
-		UE_LOG(LogWebView2,Error,TEXT("Failed to create WebView2 environment"));
-		return S_OK;
-	}
-
-	Microsoft::WRL::ComPtr<ICoreWebView2ControllerOptions> options;
-    // The validation of parameters occurs when setting the properties.
-    HRESULT hr = webViewEnvironment10->CreateCoreWebView2ControllerOptions(&options);
-    if (hr == E_INVALIDARG)
-    {
-
-    	UE_LOG(LogWebView2,Error,TEXT("Unable to create WebView2 due to an invalid profile name."));
-        CloseWindow();
-        return S_OK;
-    }
-    //! [CreateControllerWithOptions] 
-
-	UWebView2Settings* Settings=UWebView2Settings::Get();
-	
-	// 如果使用无效的配置文件名称调用“put_ProfileName”，则会立即返回“E_INVALIDARG”。ProfileName 可以重复使用。
-    options->put_ProfileName(*Settings->WebViewCreateOption.Profile);
-    options->put_IsInPrivateModeEnabled(Settings->WebViewCreateOption.bInPrivate);
-
-    //! [ScriptLocaleSetting]
-   Microsoft::WRL::ComPtr<ICoreWebView2ControllerOptions2> webView2ControllerOptions2;
-    if (SUCCEEDED(options->QueryInterface(IID_PPV_ARGS(&webView2ControllerOptions2))))
-    {
-        if (Settings->WebViewCreateOption.bUseOSRegion)
-        {
-            wchar_t osLocale[LOCALE_NAME_MAX_LENGTH] = {0};
-            GetUserDefaultLocaleName(osLocale, LOCALE_NAME_MAX_LENGTH);
-            webView2ControllerOptions2->put_ScriptLocale(osLocale);
-        }
-        else if (!Settings->WebViewCreateOption.ScriptLocale.IsEmpty())
-        {
-            webView2ControllerOptions2->put_ScriptLocale(*Settings->WebViewCreateOption.ScriptLocale);
-        }
-    }
-    //! [ScriptLocaleSetting]
-
-    //! [AllowHostInputProcessing]
-	Microsoft::WRL::ComPtr<ICoreWebView2ExperimentalControllerOptions2>
-	webView2ExperimentalControllerOptions2;
-	if (SUCCEEDED(
-		options->QueryInterface(IID_PPV_ARGS(&webView2ExperimentalControllerOptions2))))
-        {
-			//用于启用/禁用在传递到 WebView2 之前通过应用程序传递的输入
-			webView2ExperimentalControllerOptions2->put_AllowHostInputProcessing(true);
-        }
-    
-    //! [AllowHostInputProcessing]
-    if (DcompDevice || FWebView2Manager::GetInstance()->DispatcherQueueController)
-    {
-        //! [OnCreateCoreWebView2ControllerCompleted]
-        webViewEnvironment10->CreateCoreWebView2CompositionControllerWithOptions(
-            MainWindow, options.Get(),
-            Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
-                [this](
-                    HRESULT result,
-                    ICoreWebView2CompositionController* compositionController) -> HRESULT
-                {
-					//todo 5.2控制器未获取
-                	CompositionController=compositionController;
-                     Microsoft::WRL::ComPtr<ICoreWebView2Controller> controlle;
-                     	CompositionController.As(&controlle);
-                    return OnCreateCoreWebView2ControllerCompleted(result, controlle.Get());
-                })
-                .Get());
-        //! [OnCreateCoreWebView2ControllerCompleted]
-    }
-    else
-    {
-       webViewEnvironment10->CreateCoreWebView2ControllerWithOptions(
-            MainWindow, options.Get(),
-            Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                this, &FWebView2Window::OnCreateCoreWebView2ControllerCompleted)
-                .Get());
-    }
-
-    return S_OK;
-}
-
-
-// 我们有自己的 DCompositionCreateDevice2 实现，可动态加载 dcomp.dll 来创建设备。
-// 不依赖 dcomp.dll 可使示例应用程序在不支持 dcomp 的 Windows 版本上运行。
-HRESULT FWebView2Window::DCompositionCreateDevice2(IUnknown* RenderingDevice, const IID& Riid, void** PPV)
-{
-	
-	HRESULT Result = E_FAIL;
-	static decltype(::DCompositionCreateDevice2)* fnCreateDCompDevice2 = nullptr;
-	if (fnCreateDCompDevice2 == nullptr)
-	{
-		HMODULE hmod = ::LoadLibraryEx(L"dcomp.dll", nullptr, 0);
-		if (hmod != nullptr)
+		if (CompositionController)
 		{
-			fnCreateDCompDevice2 = reinterpret_cast<decltype(::DCompositionCreateDevice2)*>(
-				::GetProcAddress(hmod, "DCompositionCreateDevice2"));
+			CompositionController->put_RootVisualTarget(nullptr);
+			CompositionController->remove_CursorChanged(CursorChangedToken);
 		}
-	}
-	if (fnCreateDCompDevice2 != nullptr)
-	{
-		Result = fnCreateDCompDevice2(RenderingDevice, Riid, PPV);
-	}
-	return Result;
-}
 
-HRESULT FWebView2Window::TryCreateDispatcherQueue()
-{
-	
-
-	HRESULT Hresult = S_OK;
-	thread_local winSystem::DispatcherQueueController dispatcherQueueController{nullptr};
-
-	if (dispatcherQueueController == nullptr)
-	{
-		Hresult = E_FAIL;
-		static decltype(::CreateDispatcherQueueController)* fnCreateDispatcherQueueController =
-			nullptr;
-		if (fnCreateDispatcherQueueController == nullptr)
-		{
-			HMODULE hmod = ::LoadLibraryEx(L"CoreMessaging.dll", nullptr, 0);
-			if (hmod != nullptr)
-			{
-				fnCreateDispatcherQueueController =
-					reinterpret_cast<decltype(::CreateDispatcherQueueController)*>(
-						::GetProcAddress(hmod, "CreateDispatcherQueueController"));
-			}
-		}
-		if (fnCreateDispatcherQueueController != nullptr)
-		{
-			winSystem::DispatcherQueueController controller{nullptr};
-			DispatcherQueueOptions options{
-				sizeof(DispatcherQueueOptions), DQTYPE_THREAD_CURRENT, DQTAT_COM_STA};
-			Hresult = fnCreateDispatcherQueueController(
-				options, reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(
-							 winrt::put_abi(controller)));
-			dispatcherQueueController = controller;
-		}
+		Controller->remove_AcceleratorKeyPressed(AcceleratorKeyPressedToken);
+		Controller->Close();
 	}
 
-	return Hresult;
-}
-
-ICoreWebView2Controller* FWebView2Window::GetWebViewController()
-{
-	return Controller.Get();
-}
-
-ICoreWebView2* FWebView2Window::GetWebView()
-{
-	return WebView.Get();
-}
-
-ICoreWebView2Environment* FWebView2Window::GetWebViewEnvironment()
-{
-	return WebViewEnvironment.Get();
-}
-
-HWND FWebView2Window::GetMainWindow()
-{
-	return MainWindow;
-}
-
-bool FWebView2Window::CloseWebView(bool CleanupUserDataFolder)
-{
-	
-	//TODO
-	// if (auto file = GetComponent<FWebView2FileComponent>())
-  //  {
-       // if (file->IsPrintToPdfInProgress())
-       // {
-        //	UE_LOG(LogWebView2,Log,TEXT("Print to PDF is in progress. Continue closing?"));
-        	//return false;
-//}
-   // }
-    // 1. Delete components.
-    DeleteAllComponents();
-
-	// 2. 如果需要清理并且 BrowserProcessExited 事件接口可用，则注册在浏览器退出时进行清理。
-    Microsoft::WRL::ComPtr<ICoreWebView2Environment5> environment5;
-    if (WebViewEnvironment)
-    {
-    	WebViewEnvironment.As(&environment5);
-    }
-    if (CleanupUserDataFolder && environment5)
-    {
-    	// 在关闭 WebView 之前，注册一个处理程序，其中包含在浏览器进程和相关进程终止后运行的代码。
-        environment5->add_BrowserProcessExited(
-	        Microsoft::WRL::Callback<ICoreWebView2BrowserProcessExitedEventHandler>(
-                [environment5, this](
-                    ICoreWebView2Environment* sender,
-                    ICoreWebView2BrowserProcessExitedEventArgs* args)
-                {
-                    COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND kind;
-                    UINT32 pid;
-                    args->get_BrowserProcessExitKind(&kind);
-                    args->get_BrowserProcessId(&pid);
-
-                	// 如果在浏览器退出后但在我们的处理程序运行之前从此 CoreWebView2Environment 创建了新的 WebView，
-                	// 则将创建一个新的浏览器进程并再次锁定用户数据文件夹。在这些情况下，请勿尝试清理用户数据文件夹。
-                	// 我们根据我们最后一个 CoreWebView2 附加到的浏览器进程的 PID 检查已退出浏览器进程的 PID。
-                    if (pid == NewestBrowserPID)
-                    {
-                    	// 观察浏览器进程是否正常退出。让 ProcessFailed 事件处理程序处理浏览器进程终止失败的情况。
-                        if (kind == COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL)
-                        {
-                            environment5->remove_BrowserProcessExited(BrowserExitedEventToken);
-                            // TODO
-                            WebViewEnvironment = nullptr;
-                           // RunAsync([this]() { CleanupUserDataFolder(); });
-                        }
-                    }
-                    else
-                    {
-                    	// TODO
-                    }
-
-                    return S_OK;
-                })
-                .Get(),
-            &BrowserExitedEventToken);
-    }
-
-    // 3. Close the webview.
-    if (Controller)
-    {
-    	Controller->remove_ZoomFactorChanged(ZoomFactorChangedToken);
-    	Controller->remove_AcceleratorKeyPressed(AcceleratorKeyPressedEventHandlerToken);
-        Controller->Close();
-        Controller = nullptr;
-
-    	WebView->remove_WebMessageReceived(MessageReceiveToken);
-    	WebView->remove_NavigationCompleted(NavigationCompletedToken);
-    	WebView->remove_HistoryChanged(HistoryChangedToken);
-    	WebView->remove_DocumentTitleChanged(DocumentTitleChangedToken);
-    	WebView->remove_SourceChanged(SourceChangedToken);
-    	WebView->remove_NavigationStarting(NavigationStartingToken);
-    	WebView4->remove_DownloadStarting(DownloadStartingToken);
-    	WebView4->remove_NewWindowRequested(NewWindowRequestedToken);
-        WebView = nullptr;
-        WebView4 = nullptr;
-    }
-
-	if (CompositionController)
-	{
-		CompositionController->remove_CursorChanged(CursorChangedEventHandlerToken);
-	}
+	WebView = nullptr;
 	CompositionController = nullptr;
-	
-	// 4. 如果 BrowserProcessExited 事件接口不可用，则立即释放环境并进行清理。如果接口可用，则仅在不等待事件的情况下释放环境。
-    if (!environment5)
-    {
-    	
-        WebViewEnvironment = nullptr;
-        if (CleanupUserDataFolder)
-        {
-        	//TODO
-          //  CleanupUserDataFolder();
-        }
-    }
-    else if (!CleanupUserDataFolder)
-    {
-    	// 仅当不需要清理时才在此处释放环境对象。
-    	// 如果需要清理，则环境对象释放将推迟到浏览器进程退出，否则不会调用 BrowserProcessExited 事件的处理程序。
-        WebViewEnvironment = nullptr;
-    }
-
-	//5. 清理CompositionHost,
-	if(WebView2CompositionHost)
+	Controller = nullptr;
+	WebViewEnvironment = nullptr;
+	WebViewVisual = nullptr;
+	for (const TPair<uint64, FTrackedDownloadRegistration>& Pair : ActiveDownloads)
 	{
-		WebView2CompositionHost->DestroyVisualAsWebview(AsShared());
+		if (Pair.Value.Operation)
+		{
+			Pair.Value.Operation->remove_BytesReceivedChanged(Pair.Value.BytesReceivedChangedToken);
+			Pair.Value.Operation->remove_StateChanged(Pair.Value.StateChangedToken);
+		}
 	}
-
-	
-    return true;
+	ActiveDownloads.Empty();
+	bInitialized = false;
+	return true;
 }
 
 void FWebView2Window::CloseWindow()
 {
-	UE_LOG(LogWebView2,Log,TEXT("WebView2Window is destoryed"))
-	if (!CloseWebView())
-	{
-		return;
-	}
-	
+	Close();
 }
 
-void FWebView2Window::DeleteAllComponents()
+bool FWebView2Window::IsInitialized() const
 {
-	if (!Components.IsEmpty())
-	{
-		Components.Empty();
-	}
+	return bInitialized;
 }
 
-auto FWebView2Window::LoadURL(const FString URL) -> void
+int32 FWebView2Window::GetLayerId() const
 {
-	if(URL.IsEmpty())
-	{
-		return;;
-	}
+	return LayerId;
+}
+
+void FWebView2Window::SetLayerId(int32 InLayerId)
+{
+	LayerId = InLayerId;
+}
+
+FGuid FWebView2Window::GetInstanceId() const
+{
+	return InstanceId;
+}
+
+void FWebView2Window::ExecuteScript(const FString& Script, TFunction<void(const FString&)> Callback)
+{
 	if (!WebView)
 	{
 		return;
 	}
-	WebView->Navigate(*URL);
+
+	WebView->ExecuteScript(
+		*Script,
+		Microsoft::WRL::Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+			[Callback](HRESULT ErrorCode, LPCWSTR ResultString) -> HRESULT
+			{
+				if (SUCCEEDED(ErrorCode) && ResultString && Callback)
+				{
+					Callback(FString(ResultString));
+				}
+				return S_OK;
+			})
+			.Get());
 }
 
+void FWebView2Window::OpenDevToolsWindow() const
+{
+	if (WebView)
+	{
+		WebView->OpenDevToolsWindow();
+	}
+}
+
+void FWebView2Window::PrintToPdf(const FString& OutputPath, bool bLandscape)
+{
+	if (!WebView || OutputPath.IsEmpty())
+	{
+		OnPrintToPdfCompleted.ExecuteIfBound(false, OutputPath);
+		return;
+	}
+
+	Microsoft::WRL::ComPtr<ICoreWebView2_7> WebView7;
+	if (FAILED(WebView.As(&WebView7)) || !WebView7)
+	{
+		UE_LOG(LogWebView2Utils, Warning, TEXT("当前 WebView2 Runtime 不支持 PrintToPdf 接口。"));
+		OnPrintToPdfCompleted.ExecuteIfBound(false, OutputPath);
+		return;
+	}
+
+	const FString AbsoluteOutputPath = FPaths::ConvertRelativePathToFull(OutputPath);
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(AbsoluteOutputPath), true);
+
+	Microsoft::WRL::ComPtr<ICoreWebView2PrintSettings> PrintSettings;
+	if (bLandscape)
+	{
+		Microsoft::WRL::ComPtr<ICoreWebView2Environment6> Environment6;
+		if (SUCCEEDED(WebViewEnvironment.As(&Environment6)) && Environment6)
+		{
+			if (SUCCEEDED(Environment6->CreatePrintSettings(&PrintSettings)) && PrintSettings)
+			{
+				PrintSettings->put_Orientation(COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE);
+			}
+		}
+	}
+
+	WebView7->PrintToPdf(
+		*AbsoluteOutputPath,
+		PrintSettings.Get(),
+		Microsoft::WRL::Callback<ICoreWebView2PrintToPdfCompletedHandler>(
+			[this, AbsoluteOutputPath](HRESULT ErrorCode, BOOL bSuccess) -> HRESULT
+			{
+				if (FAILED(ErrorCode))
+				{
+					UE_LOG(LogWebView2Utils, Error, TEXT("PrintToPdf 失败，HRESULT=0x%08x，路径=%s"), ErrorCode, *AbsoluteOutputPath);
+					OnPrintToPdfCompleted.ExecuteIfBound(false, AbsoluteOutputPath);
+					return S_OK;
+				}
+
+				OnPrintToPdfCompleted.ExecuteIfBound(!!bSuccess, AbsoluteOutputPath);
+				return S_OK;
+			})
+			.Get());
+}
+
+void FWebView2Window::SetBackgroundColor(const FColor& InBackgroundColor)
+{
+	BackgroundColor = InBackgroundColor;
+	Microsoft::WRL::ComPtr<ICoreWebView2Controller2> Controller2;
+	if (SUCCEEDED(Controller.As(&Controller2)) && Controller2)
+	{
+		Controller2->put_DefaultBackgroundColor(ToCoreColor(InBackgroundColor));
+	}
+}
+
+void FWebView2Window::SetContainerVisual(winrt::Windows::UI::Composition::ContainerVisual InContainerVisual)
+{
+	WebViewVisual = InContainerVisual;
+}
+
+TSharedPtr<FWebView2CompositionHost> FWebView2Window::GetCompositionHost() const
+{
+	return CompositionHost;
+}
+
+void FWebView2Window::SetHitTestEnabled(bool bInHitTestEnabled)
+{
+	bHitTestEnabled = bInHitTestEnabled;
+}
+
+bool FWebView2Window::IsHitTestEnabled() const
+{
+	return bHitTestEnabled;
+}
+
+bool FWebView2Window::IsTransparencyHitTestEnabled() const
+{
+	return bEnableTransparencyHitTest;
+}
+
+void FWebView2Window::LoadURL(const FString& InUrl)
+{
+	if (WebView && !InUrl.IsEmpty())
+	{
+		WebView->Navigate(*InUrl);
+	}
+}
 
 void FWebView2Window::GoForward() const
 {
 	if (WebView)
 	{
-		BOOL bIsSuccess = false;
-		WebView->get_CanGoForward(&bIsSuccess);
-		if (bIsSuccess)
+		BOOL bCanGoForward = 0;
+		WebView->get_CanGoForward(&bCanGoForward);
+		if (bCanGoForward)
 		{
 			WebView->GoForward();
 		}
@@ -495,16 +471,16 @@ void FWebView2Window::GoBack() const
 {
 	if (WebView)
 	{
-		BOOL bIsSuccess = false;
-		WebView->get_CanGoBack(&bIsSuccess);
-		if (bIsSuccess)
+		BOOL bCanGoBack = 0;
+		WebView->get_CanGoBack(&bCanGoBack);
+		if (bCanGoBack)
 		{
 			WebView->GoBack();
 		}
 	}
 }
 
-void FWebView2Window::ReLoad() const
+void FWebView2Window::Reload() const
 {
 	if (WebView)
 	{
@@ -520,106 +496,50 @@ void FWebView2Window::Stop() const
 	}
 }
 
-void FWebView2Window::PutCoreWebView2Settings(FCoreWebView2Settings CoreWebView2Settings)
+void FWebView2Window::SetBounds(const RECT& InRect)
 {
-	if(WebView)
+	Bounds = InRect;
+	if (Controller)
 	{
-		ICoreWebView2Settings* Settings;
-		WebView->get_Settings(&Settings);
-		Settings->put_AreDefaultContextMenusEnabled(CoreWebView2Settings.bDefaultContextMenusEnabled);
-		Settings->put_AreDefaultScriptDialogsEnabled(CoreWebView2Settings.bDefaultScriptDialogsEnabled);
-		Settings->put_AreDevToolsEnabled(CoreWebView2Settings.bDevToolsEnabled);
-		Settings->put_AreHostObjectsAllowed(CoreWebView2Settings.bHostObjectsAllowed);
-		Settings->put_IsBuiltInErrorPageEnabled(CoreWebView2Settings.bBuiltInErrorPageEnabled);
-		Settings->put_IsScriptEnabled(CoreWebView2Settings.bDefaultScriptDialogsEnabled);
-		Settings->put_IsStatusBarEnabled(CoreWebView2Settings.bStatusBarEnabled);
-		Settings->put_IsWebMessageEnabled(CoreWebView2Settings.bWebMessageEnabled);
-		Settings->put_IsZoomControlEnabled(CoreWebView2Settings.bZoomControlEnabled);
+		// Windowed 模式直接更新 Controller Bounds。
+		Controller->put_Bounds(Bounds);
 	}
-}
 
-void FWebView2Window::SetBackgroundColor(FColor InBackgroundColor)
-{
-	BackgroundColor=InBackgroundColor;
-	COREWEBVIEW2_COLOR transparentColor = {InBackgroundColor.A, InBackgroundColor.R,InBackgroundColor.G, InBackgroundColor.B};
-	Microsoft::WRL::ComPtr<ICoreWebView2Controller2> TmpContrll;
-	Controller.As(&TmpContrll);
-	if (TmpContrll)
+	if (CompositionController)
 	{
-		TmpContrll->get_ParentWindow(nullptr);
-		TmpContrll->put_DefaultBackgroundColor(transparentColor);
-
-		TmpContrll->add_ZoomFactorChanged(
-			Microsoft::WRL::Callback<ICoreWebView2ZoomFactorChangedEventHandler>(
-				[this](ICoreWebView2Controller* sender,
-					   IUnknown* args) -> HRESULT
-				{
-					//double zoomFactor;
-					//sender->get_ZoomFactor(&zoomFactor);
-					sender->put_ZoomFactor(1.f);
-					return S_OK;
-				})
-			.Get(), &ZoomFactorChangedToken);
-	}
-}
-
-bool FWebView2Window::IsInitialized()
-{
-	return bInitialized;
-}
-
-void FWebView2Window::SetBounds(RECT Rect)
-{
-	WebuiBound = Rect;
-	if(Controller)
-	{
-		Controller->put_Bounds(Rect);
-	}
-	if(CompositionController)
-	{
+		// WinComp 模式同步更新挂在 RootVisualTarget 上的容器位置与尺寸。
 		winrt::com_ptr<IUnknown> RootVisualTarget;
 		CompositionController->get_RootVisualTarget(RootVisualTarget.put());
-		if(RootVisualTarget)
+		if (RootVisualTarget)
 		{
-			winrt::Windows::UI::Composition::ContainerVisual InwebviewVisual = RootVisualTarget.as<winrt::Windows::UI::Composition::ContainerVisual>();
-			if (InwebviewVisual)
-			{
-				InwebviewVisual.Offset({static_cast<float>(WebuiBound.left),static_cast<float>(WebuiBound.top),0});
-				InwebviewVisual.Size({
-			(static_cast<float>(WebuiBound.right - WebuiBound.left)),
-			(static_cast<float>(WebuiBound.bottom - WebuiBound.top))});
-			}
+			auto Container = RootVisualTarget.as<winrt::Windows::UI::Composition::ContainerVisual>();
+			Container.Offset({static_cast<float>(Bounds.left), static_cast<float>(Bounds.top), 0.0f});
+			Container.Size({static_cast<float>(Bounds.right - Bounds.left), static_cast<float>(Bounds.bottom - Bounds.top)});
 		}
 	}
 }
 
-void FWebView2Window::SetBounds(POINT Offset, POINT Size)
+void FWebView2Window::SetBounds(const POINT& InOffset, const POINT& InSize)
 {
-	WebuiBound.top = LONG(Offset.y);
-	WebuiBound.left = LONG(Offset.x);
-	WebuiBound.bottom = LONG(Size.y + WebuiBound.top);
-	WebuiBound.right = LONG(Size.x + WebuiBound.left);
-	SetBounds(WebuiBound);
+	RECT NewRect;
+	NewRect.left = InOffset.x;
+	NewRect.top = InOffset.y;
+	NewRect.right = InOffset.x + InSize.x;
+	NewRect.bottom = InOffset.y + InSize.y;
+	SetBounds(NewRect);
 }
 
 RECT FWebView2Window::GetBounds() const
 {
-	return WebuiBound;
+	return Bounds;
 }
 
 void FWebView2Window::SetVisible(ESlateVisibility InVisibility)
 {
-	Visible=InVisibility;
-	if(InVisibility==ESlateVisibility::Collapsed ||InVisibility==ESlateVisibility::Hidden)
+	Visible = InVisibility;
+	if (Controller)
 	{
-		if(Controller)
-		{
-			Controller->put_IsVisible(false);
-		}
-	}
-	else
-	{
-		Controller->put_IsVisible(true);
+		Controller->put_IsVisible(InVisibility != ESlateVisibility::Collapsed && InVisibility != ESlateVisibility::Hidden);
 	}
 }
 
@@ -628,583 +548,699 @@ ESlateVisibility FWebView2Window::GetVisible() const
 	return Visible;
 }
 
-EWebView2DocumentState FWebView2Window::GetDocumentLoadingState() const
+ECBWebView2DocumentState FWebView2Window::GetDocumentLoadingState() const
 {
 	return DocumentState;
 }
 
-
-void FWebView2Window::SetLayerID(int32 InLayerID)
+void FWebView2Window::MoveFocus(bool bFocus)
 {
-	LayerID = InLayerID;
+	if (bFocus && ParentWindow)
+	{
+		// 先确保宿主 HWND 拿到系统焦点，再请求 WebView 内部焦点移动。
+		if (::GetFocus() != ParentWindow)
+		{
+			::SetFocus(ParentWindow);
+		}
+	}
+
+	if (Controller && bFocus)
+	{
+		Controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+	}
 }
 
-int32 FWebView2Window::GetLayerID() const
+void FWebView2Window::SendMouseButton(const FVector2D& Point, bool bIsLeft, bool bIsDown)
 {
-	return LayerID;
+	if (CompositionController)
+	{
+		POINT MousePoint{static_cast<LONG>(Point.X), static_cast<LONG>(Point.Y)};
+		const COREWEBVIEW2_MOUSE_EVENT_KIND Kind = bIsLeft
+			? (bIsDown ? COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN : COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP)
+			: (bIsDown ? COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN : COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP);
+		CompositionController->SendMouseInput(Kind, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_NONE, 0, MousePoint);
+	}
 }
 
-FGuid FWebView2Window::GetUniqueID()
+void FWebView2Window::SendMouseMove(const FVector2D& Point)
 {
-	return ID;
+	if (CompositionController)
+	{
+		POINT MousePoint{static_cast<LONG>(Point.X), static_cast<LONG>(Point.Y)};
+		CompositionController->SendMouseInput(COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_NONE, 0, MousePoint);
+	}
 }
 
-void FWebView2Window::ExecuteScript(const FString Script, TFunction<void(const FString ResultString)> InCallback)
+void FWebView2Window::SendMouseWheel(const FVector2D& Point, float Delta)
+{
+	if (CompositionController)
+	{
+		POINT MousePoint{static_cast<LONG>(Point.X), static_cast<LONG>(Point.Y)};
+		CompositionController->SendMouseInput(
+			COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
+			COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS_NONE,
+			static_cast<UINT32>(Delta * 120.0f),
+			MousePoint);
+	}
+}
+
+void FWebView2Window::SendKeyboardMessage(uint32 Msg, uint64 WParam, int64 LParam)
+{
+	if (ParentWindow)
+	{
+		// 统一走宿主窗口消息链，便于和现有输入处理保持一致。
+		::SendMessageW(ParentWindow, Msg, static_cast<WPARAM>(WParam), static_cast<LPARAM>(LParam));
+	}
+}
+
+HRESULT FWebView2Window::CreateControllerWithOptions()
+{
+	// 优先尝试高版本 Environment10，以获得 ControllerOptions 能力。
+	Microsoft::WRL::ComPtr<ICoreWebView2Environment10> Environment10;
+	WebViewEnvironment.As(&Environment10);
+
+	const UWebView2Settings* Settings = UWebView2Settings::Get();
+	const ECBWebView2Mode Mode = Settings ? Settings->Mode : ECBWebView2Mode::VisualWinComp;
+
+	if (!Environment10)
+	{
+		// 旧版 Runtime 回退到基础 Controller / CompositionController 创建路径。
+		Microsoft::WRL::ComPtr<ICoreWebView2Environment3> Environment3;
+		WebViewEnvironment.As(&Environment3);
+
+		if (Mode == ECBWebView2Mode::Windowed)
+		{
+			return WebViewEnvironment->CreateCoreWebView2Controller(
+				ParentWindow,
+				Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+					this,
+					&FWebView2Window::OnCreateControllerCompleted)
+					.Get());
+		}
+
+		if (!Environment3)
+		{
+			return E_NOINTERFACE;
+		}
+
+		return Environment3->CreateCoreWebView2CompositionController(
+			ParentWindow,
+			Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
+				[this](HRESULT Result, ICoreWebView2CompositionController* InCompositionController) -> HRESULT
+				{
+					CompositionController = InCompositionController;
+					Microsoft::WRL::ComPtr<ICoreWebView2Controller> BaseController;
+					CompositionController.As(&BaseController);
+					return OnCreateControllerCompleted(Result, BaseController.Get());
+				})
+				.Get());
+	}
+
+	Microsoft::WRL::ComPtr<ICoreWebView2ControllerOptions> ControllerOptions;
+	HRESULT Hr = Environment10->CreateCoreWebView2ControllerOptions(&ControllerOptions);
+	if (FAILED(Hr))
+	{
+		UE_LOG(LogWebView2Utils, Error, TEXT("创建 ControllerOptions 失败，HRESULT=0x%08x"), Hr);
+		return Hr;
+	}
+
+	if (Settings)
+	{
+		// 这一部分属于 Controller 级配置，需要在创建前一次性写入。
+		ControllerOptions->put_ProfileName(*Settings->Controller.ProfileName);
+		ControllerOptions->put_IsInPrivateModeEnabled(Settings->Controller.bInPrivate);
+
+		Microsoft::WRL::ComPtr<ICoreWebView2ControllerOptions2> ControllerOptions2;
+		if (SUCCEEDED(ControllerOptions.As(&ControllerOptions2)))
+		{
+			if (Settings->Controller.bUseOSRegion)
+			{
+				wchar_t LocaleName[LOCALE_NAME_MAX_LENGTH] = {};
+				GetUserDefaultLocaleName(LocaleName, LOCALE_NAME_MAX_LENGTH);
+				ControllerOptions2->put_ScriptLocale(LocaleName);
+			}
+			else if (!Settings->Controller.ScriptLocale.IsEmpty())
+			{
+				ControllerOptions2->put_ScriptLocale(*Settings->Controller.ScriptLocale);
+			}
+		}
+
+		Microsoft::WRL::ComPtr<ICoreWebView2ExperimentalControllerOptions2> ExperimentalControllerOptions2;
+		if (SUCCEEDED(ControllerOptions.As(&ExperimentalControllerOptions2)))
+		{
+			ExperimentalControllerOptions2->put_AllowHostInputProcessing(Settings->Controller.bAllowHostInputProcessing);
+		}
+	}
+
+	if (Mode == ECBWebView2Mode::Windowed)
+	{
+		return Environment10->CreateCoreWebView2ControllerWithOptions(
+			ParentWindow,
+			ControllerOptions.Get(),
+			Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+				this,
+				&FWebView2Window::OnCreateControllerCompleted)
+				.Get());
+	}
+
+	return Environment10->CreateCoreWebView2CompositionControllerWithOptions(
+		ParentWindow,
+		ControllerOptions.Get(),
+		Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
+			[this](HRESULT Result, ICoreWebView2CompositionController* InCompositionController) -> HRESULT
+			{
+				CompositionController = InCompositionController;
+				Microsoft::WRL::ComPtr<ICoreWebView2Controller> BaseController;
+				CompositionController.As(&BaseController);
+				return OnCreateControllerCompleted(Result, BaseController.Get());
+			})
+			.Get());
+}
+
+HRESULT FWebView2Window::DCompositionCreateDevice2(IUnknown* RenderingDevice, REFIID Riid, void** PPV)
+{
+	static decltype(::DCompositionCreateDevice2)* CreateDeviceFunc = nullptr;
+	if (!CreateDeviceFunc)
+	{
+		if (HMODULE ModuleHandle = ::LoadLibraryEx(L"dcomp.dll", nullptr, 0))
+		{
+			CreateDeviceFunc = reinterpret_cast<decltype(::DCompositionCreateDevice2)*>(
+				::GetProcAddress(ModuleHandle, "DCompositionCreateDevice2"));
+		}
+	}
+
+	return CreateDeviceFunc ? CreateDeviceFunc(RenderingDevice, Riid, PPV) : E_FAIL;
+}
+
+HRESULT FWebView2Window::OnCreateEnvironmentCompleted(HRESULT Result, ICoreWebView2Environment* Environment)
+{
+	if (FAILED(Result) || !Environment)
+	{
+		UE_LOG(LogWebView2Utils, Error, TEXT("WebView2 Environment 创建失败，HRESULT=0x%08x"), Result);
+		return S_OK;
+	}
+
+	WebViewEnvironment = Environment;
+	bInitialized = true;
+	return CreateControllerWithOptions();
+}
+
+HRESULT FWebView2Window::OnCreateControllerCompleted(HRESULT Result, ICoreWebView2Controller* InController)
+{
+	if (FAILED(Result) || !InController)
+	{
+		UE_LOG(LogWebView2Utils, Error, TEXT("WebView2 Controller 创建失败，HRESULT=0x%08x"), Result);
+		OnWebViewCreated.ExecuteIfBound(false);
+		return S_OK;
+	}
+
+	Controller = InController;
+	Microsoft::WRL::ComPtr<ICoreWebView2> CoreWebView;
+	Controller->get_CoreWebView2(&CoreWebView);
+	CoreWebView.As(&WebView);
+
+	if (WebView)
+	{
+		WebView->get_BrowserProcessId(&BrowserProcessId);
+	}
+
+	const UWebView2Settings* Settings = UWebView2Settings::Get();
+	if (Settings)
+	{
+		Microsoft::WRL::ComPtr<ICoreWebView2_13> WebView13;
+		if (SUCCEEDED(WebView.As(&WebView13)) && WebView13 && !Settings->Controller.DownloadPath.IsEmpty())
+		{
+			Microsoft::WRL::ComPtr<ICoreWebView2Profile> Profile;
+			if (SUCCEEDED(WebView13->get_Profile(&Profile)) && Profile)
+			{
+				Profile->put_DefaultDownloadFolderPath(*Settings->Controller.DownloadPath);
+			}
+		}
+	}
+
+	Controller->put_Bounds(Bounds);
+	Controller->put_IsVisible(Visible != ESlateVisibility::Collapsed && Visible != ESlateVisibility::Hidden);
+
+	if (CompositionController)
+	{
+		// 无窗口模式下把当前 WebView 挂接到宿主 HWND 对应的组合宿主中。
+		CompositionHost = FWebView2Manager::Get().GetOrCreateCompositionHost(ParentWindow);
+		if (CompositionHost.IsValid())
+		{
+			CompositionHost->AttachWebView(AsShared());
+		}
+	}
+
+	ApplyRuntimeSettings();
+	RegisterCoreEvents();
+	SetBackgroundColor(BackgroundColor);
+
+	if (WebView && bEnableTransparencyHitTest)
+	{
+		// 为启用透明命中检测的页面注入辅助脚本。
+		const FString InjectedScript = LoadTransparencyCheckScript();
+		if (!InjectedScript.IsEmpty())
+		{
+			WebView->AddScriptToExecuteOnDocumentCreated(
+				*InjectedScript,
+				Microsoft::WRL::Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+					[](HRESULT ErrorCode, PCWSTR ScriptId) -> HRESULT
+					{
+						if (FAILED(ErrorCode))
+						{
+							UE_LOG(LogWebView2Utils, Warning, TEXT("注入透明穿透脚本失败，HRESULT=0x%08x"), ErrorCode);
+						}
+						return S_OK;
+					})
+					.Get());
+		}
+	}
+
+	if (!InitialUrl.IsEmpty())
+	{
+		WebView->Navigate(*InitialUrl);
+	}
+
+	OnWebViewCreated.ExecuteIfBound(true);
+
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnMessageReceivedInternal(ICoreWebView2* Sender, ICoreWebView2WebMessageReceivedEventArgs* Args)
+{
+	// 优先按纯字符串读取，失败时再回退到 JSON，兼容不同 postMessage 发送方式。
+	LPWSTR RawMessage = nullptr;
+	if (FAILED(Args->TryGetWebMessageAsString(&RawMessage)) || RawMessage == nullptr)
+	{
+		Args->get_WebMessageAsJson(&RawMessage);
+	}
+
+	const FString Message = TakeCoTaskMemString(RawMessage);
+	UE_LOG(LogWebView2Utils, Verbose, TEXT("收到网页消息: %s"), *Message);
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::WebMessageReceived;
+	EventInfo.Message = Message;
+	EmitMonitoredEvent(EventInfo);
+
+	OnMessageReceived.ExecuteIfBound(Message);
+	if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+	{
+		// 统一向子系统广播，方便全局监听。
+		Subsystem->OnWebMessageReceivedNative.ExecuteIfBound(Message);
+		Subsystem->OnWebMessageReceived.Broadcast(Message);
+	}
+
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnNewWindowRequestedInternal(ICoreWebView2* Sender, ICoreWebView2NewWindowRequestedEventArgs* Args)
+{
+	LPWSTR Uri = nullptr;
+	Args->get_Uri(&Uri);
+	const FString TargetUrl = TakeCoTaskMemString(Uri);
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::NewWindowRequested;
+	EventInfo.Url = TargetUrl;
+	EmitMonitoredEvent(EventInfo);
+
+	OnNewWindowRequested.ExecuteIfBound(TargetUrl);
+	Args->put_Handled(true);
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnNavigationCompletedInternal(ICoreWebView2* Sender, ICoreWebView2NavigationCompletedEventArgs* Args)
+{
+	BOOL bSuccess = 0;
+	Args->get_IsSuccess(&bSuccess);
+	DocumentState = bSuccess ? ECBWebView2DocumentState::Completed : ECBWebView2DocumentState::Error;
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::NavigationCompleted;
+	EventInfo.bSuccess = !!bSuccess;
+	EmitMonitoredEvent(EventInfo);
+
+	OnNavigationCompleted.ExecuteIfBound(!!bSuccess);
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnNavigationStartingInternal(ICoreWebView2* Sender, ICoreWebView2NavigationStartingEventArgs* Args)
+{
+	LPWSTR Uri = nullptr;
+	Args->get_Uri(&Uri);
+	DocumentState = ECBWebView2DocumentState::Loading;
+	const FString TargetUrl = TakeCoTaskMemString(Uri);
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::NavigationStarting;
+	EventInfo.Url = TargetUrl;
+	EmitMonitoredEvent(EventInfo);
+
+	OnNavigationStarting.ExecuteIfBound(TargetUrl);
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnCursorChangedInternal(ICoreWebView2CompositionController* Sender, IUnknown* Args)
+{
+	HCURSOR CursorHandle = nullptr;
+	const HRESULT Hr = Sender->get_Cursor(&CursorHandle);
+	if (FAILED(Hr))
+	{
+		return Hr;
+	}
+
+	EMouseCursor::Type CursorType = EMouseCursor::Default;
+	if (CursorHandle == LoadCursor(nullptr, IDC_HAND))
+	{
+		CursorType = EMouseCursor::Hand;
+	}
+	else if (CursorHandle == LoadCursor(nullptr, IDC_IBEAM))
+	{
+		CursorType = EMouseCursor::TextEditBeam;
+	}
+
+	OnCursorChanged.ExecuteIfBound(CursorType);
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnAcceleratorKeyPressedInternal(ICoreWebView2Controller* Sender, ICoreWebView2AcceleratorKeyPressedEventArgs* Args)
+{
+	COREWEBVIEW2_KEY_EVENT_KIND EventKind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+	Args->get_KeyEventKind(&EventKind);
+
+	UINT VirtualKey = 0;
+	Args->get_VirtualKey(&VirtualKey);
+
+	if (EventKind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN)
+	{
+		::PostMessageW(ParentWindow, WM_KEYDOWN, VirtualKey, 0);
+	}
+	else if (EventKind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP)
+	{
+		::PostMessageW(ParentWindow, WM_KEYUP, VirtualKey, 0);
+	}
+
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnHistoryChangedInternal(ICoreWebView2* Sender, IUnknown* Args)
+{
+	BOOL bCanGoBack = 0;
+	BOOL bCanGoForward = 0;
+	Sender->get_CanGoBack(&bCanGoBack);
+	Sender->get_CanGoForward(&bCanGoForward);
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::HistoryChanged;
+	EventInfo.bCanGoBack = !!bCanGoBack;
+	EventInfo.bCanGoForward = !!bCanGoForward;
+	EmitMonitoredEvent(EventInfo);
+
+	OnCanGoBackChanged.ExecuteIfBound(!!bCanGoBack);
+	OnCanGoForwardChanged.ExecuteIfBound(!!bCanGoForward);
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnDocumentTitleChangedInternal(ICoreWebView2* Sender, IUnknown* Args)
+{
+	LPWSTR RawTitle = nullptr;
+	Sender->get_DocumentTitle(&RawTitle);
+	const FString Title = TakeCoTaskMemString(RawTitle);
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::DocumentTitleChanged;
+	EventInfo.Title = Title;
+	EmitMonitoredEvent(EventInfo);
+
+	OnDocumentTitleChanged.ExecuteIfBound(Title);
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnSourceChangedInternal(ICoreWebView2* Sender, ICoreWebView2SourceChangedEventArgs* Args)
+{
+	LPWSTR RawSource = nullptr;
+	Sender->get_Source(&RawSource);
+	const FString Source = RawSource ? TakeCoTaskMemString(RawSource) : TEXT("about:blank");
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::SourceChanged;
+	EventInfo.Url = Source;
+	EmitMonitoredEvent(EventInfo);
+
+	OnSourceChanged.ExecuteIfBound(Source);
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnDownloadStartingInternal(ICoreWebView2* Sender, ICoreWebView2DownloadStartingEventArgs* Args)
+{
+	Microsoft::WRL::ComPtr<ICoreWebView2DownloadOperation> DownloadOperation;
+	if (FAILED(Args->get_DownloadOperation(&DownloadOperation)) || !DownloadOperation)
+	{
+		return S_OK;
+	}
+
+	EmitMonitoredEvent(BuildDownloadMonitoredEvent(ECBWebView2MonitoredEventType::DownloadStarting, DownloadOperation.Get()));
+	OnDownloadStarting.ExecuteIfBound(BuildDownloadInfo(DownloadOperation.Get()));
+	// 下载开始后注册两个持续事件：字节变化和状态变化。
+	RegisterDownloadTracking(DownloadOperation.Get());
+	return S_OK;
+}
+
+HRESULT FWebView2Window::OnPermissionRequestedInternal(ICoreWebView2* Sender, ICoreWebView2PermissionRequestedEventArgs* Args)
+{
+	COREWEBVIEW2_PERMISSION_KIND PermissionKind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+	Args->get_PermissionKind(&PermissionKind);
+
+	LPWSTR RawUri = nullptr;
+	Args->get_Uri(&RawUri);
+
+	BOOL bUserInitiated = 0;
+	Args->get_IsUserInitiated(&bUserInitiated);
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = ECBWebView2MonitoredEventType::PermissionRequested;
+	EventInfo.Url = TakeCoTaskMemString(RawUri);
+	EventInfo.PermissionKind = PermissionKindToString(PermissionKind);
+	EventInfo.bUserInitiated = !!bUserInitiated;
+	EmitMonitoredEvent(EventInfo);
+	return S_OK;
+}
+
+FWebView2DownloadInfo FWebView2Window::BuildDownloadInfo(ICoreWebView2DownloadOperation* DownloadOperation) const
+{
+	FWebView2DownloadInfo Info;
+	if (!DownloadOperation)
+	{
+		return Info;
+	}
+
+	LPWSTR RawString = nullptr;
+	if (SUCCEEDED(DownloadOperation->get_Uri(&RawString)))
+	{
+		Info.Uri = TakeCoTaskMemString(RawString);
+	}
+
+	RawString = nullptr;
+	if (SUCCEEDED(DownloadOperation->get_MimeType(&RawString)))
+	{
+		Info.MimeType = TakeCoTaskMemString(RawString);
+	}
+
+	RawString = nullptr;
+	if (SUCCEEDED(DownloadOperation->get_ResultFilePath(&RawString)))
+	{
+		Info.ResultFilePath = TakeCoTaskMemString(RawString);
+	}
+
+	DownloadOperation->get_BytesReceived(&Info.BytesReceived);
+	DownloadOperation->get_TotalBytesToReceive(&Info.TotalBytesToReceive);
+
+	COREWEBVIEW2_DOWNLOAD_STATE DownloadState = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+	if (SUCCEEDED(DownloadOperation->get_State(&DownloadState)))
+	{
+		Info.State = ToDownloadState(DownloadState);
+	}
+
+	return Info;
+}
+
+FCBWebView2MonitoredEvent FWebView2Window::BuildDownloadMonitoredEvent(ECBWebView2MonitoredEventType EventType, ICoreWebView2DownloadOperation* DownloadOperation) const
+{
+	const FWebView2DownloadInfo DownloadInfo = BuildDownloadInfo(DownloadOperation);
+
+	FCBWebView2MonitoredEvent EventInfo;
+	EventInfo.EventType = EventType;
+	EventInfo.Url = DownloadInfo.Uri;
+	EventInfo.ResultFilePath = DownloadInfo.ResultFilePath;
+	EventInfo.BytesReceived = DownloadInfo.BytesReceived;
+	EventInfo.TotalBytesToReceive = DownloadInfo.TotalBytesToReceive;
+	EventInfo.State = DownloadStateToString(DownloadInfo.State);
+	EventInfo.bSuccess = DownloadInfo.State == EWebView2DownloadState::Completed;
+	return EventInfo;
+}
+
+void FWebView2Window::EmitMonitoredEvent(const FCBWebView2MonitoredEvent& EventInfo) const
+{
+	// 先通知当前实例监听者，再向子系统做全局广播。
+	OnMonitoredEvent.ExecuteIfBound(EventInfo);
+	if (UWebView2Subsystem* Subsystem = UWebView2Subsystem::Get())
+	{
+		Subsystem->OnMonitoredEventNative.ExecuteIfBound(EventInfo);
+		Subsystem->OnMonitoredEvent.Broadcast(EventInfo);
+	}
+}
+
+void FWebView2Window::RegisterDownloadTracking(ICoreWebView2DownloadOperation* DownloadOperation)
+{
+	if (!DownloadOperation)
+	{
+		return;
+	}
+
+	// 以 COM 指针地址作为下载实例键，便于去重与解绑。
+	const uint64 DownloadKey = reinterpret_cast<uint64>(DownloadOperation);
+	if (ActiveDownloads.Contains(DownloadKey))
+	{
+		return;
+	}
+
+	FTrackedDownloadRegistration Registration;
+	Registration.Operation = DownloadOperation;
+
+	DownloadOperation->add_BytesReceivedChanged(
+		Microsoft::WRL::Callback<ICoreWebView2BytesReceivedChangedEventHandler>(
+			[this](ICoreWebView2DownloadOperation* InDownloadOperation, IUnknown* Args) -> HRESULT
+			{
+				EmitMonitoredEvent(BuildDownloadMonitoredEvent(ECBWebView2MonitoredEventType::DownloadUpdated, InDownloadOperation));
+				OnDownloadUpdated.ExecuteIfBound(BuildDownloadInfo(InDownloadOperation));
+				return S_OK;
+			})
+			.Get(),
+		&Registration.BytesReceivedChangedToken);
+
+	DownloadOperation->add_StateChanged(
+		Microsoft::WRL::Callback<ICoreWebView2StateChangedEventHandler>(
+			[this](ICoreWebView2DownloadOperation* InDownloadOperation, IUnknown* Args) -> HRESULT
+			{
+				const FWebView2DownloadInfo DownloadInfo = BuildDownloadInfo(InDownloadOperation);
+				EmitMonitoredEvent(BuildDownloadMonitoredEvent(ECBWebView2MonitoredEventType::DownloadUpdated, InDownloadOperation));
+				OnDownloadUpdated.ExecuteIfBound(DownloadInfo);
+
+				if (DownloadInfo.State != EWebView2DownloadState::InProgress)
+				{
+					UnregisterDownloadTracking(reinterpret_cast<uint64>(InDownloadOperation));
+				}
+				return S_OK;
+			})
+			.Get(),
+		&Registration.StateChangedToken);
+
+	ActiveDownloads.Add(DownloadKey, MoveTemp(Registration));
+}
+
+void FWebView2Window::UnregisterDownloadTracking(uint64 DownloadKey)
+{
+	if (FTrackedDownloadRegistration* Registration = ActiveDownloads.Find(DownloadKey))
+	{
+		if (Registration->Operation)
+		{
+			Registration->Operation->remove_BytesReceivedChanged(Registration->BytesReceivedChangedToken);
+			Registration->Operation->remove_StateChanged(Registration->StateChangedToken);
+		}
+		ActiveDownloads.Remove(DownloadKey);
+	}
+}
+
+void FWebView2Window::ApplyRuntimeSettings() const
 {
 	if (!WebView)
 	{
 		return;
 	}
-	WebView->ExecuteScript(*Script,
-	Microsoft::WRL::Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
-			[InCallback](HRESULT ErrorCode, LPCWSTR ResultString) -> HRESULT
-			{
-				if (!ErrorCode && ResultString)
-				{
-					if (InCallback)
-					{
-						UE_LOG(LogTemp,Warning,TEXT("%s"),ResultString);
-						InCallback(ResultString);
-					}
-				}
 
-				return S_OK;
-			}).Get());
-}
+	// 运行期开关与 Environment / Controller 配置不同，可以在实例创建后写入。
+	Microsoft::WRL::ComPtr<ICoreWebView2Settings> RuntimeSettings;
+	WebView->get_Settings(&RuntimeSettings);
 
-void FWebView2Window::PutHandled(bool bHandled)
-{
-	if(!Controller)
+	const UWebView2Settings* Settings = UWebView2Settings::Get();
+	if (!RuntimeSettings || !Settings)
 	{
 		return;
 	}
+
+	RuntimeSettings->put_AreDefaultContextMenusEnabled(Settings->Features.bEnableContextMenus);
+	RuntimeSettings->put_AreDefaultScriptDialogsEnabled(Settings->Features.bEnableScriptDialogs);
+	RuntimeSettings->put_AreDevToolsEnabled(Settings->Features.bEnableDevTools);
+	RuntimeSettings->put_AreHostObjectsAllowed(Settings->Features.bAllowHostObjects);
+	RuntimeSettings->put_IsBuiltInErrorPageEnabled(Settings->Features.bEnableBuiltInErrorPage);
+	RuntimeSettings->put_IsScriptEnabled(Settings->Features.bEnableScript);
+	RuntimeSettings->put_IsStatusBarEnabled(Settings->Features.bEnableStatusBar);
+	RuntimeSettings->put_IsWebMessageEnabled(Settings->Features.bEnableWebMessage);
+	RuntimeSettings->put_IsZoomControlEnabled(Settings->Features.bEnableZoomControl);
+
+	Microsoft::WRL::ComPtr<ICoreWebView2_8> WebView8;
+	if (SUCCEEDED(WebView.As(&WebView8)) && WebView8)
+	{
+		WebView8->put_IsMuted(Settings->Features.bMuted);
+	}
+}
+
+void FWebView2Window::RegisterCoreEvents()
+{
+	if (!WebView || !Controller)
+	{
+		return;
+	}
+
+	// 统一注册全部核心事件，Close 时使用对应 Token 安全解绑。
+	WebView->add_WebMessageReceived(
+		Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(this, &FWebView2Window::OnMessageReceivedInternal).Get(),
+		&MessageReceivedToken);
+
+	WebView->add_NavigationCompleted(
+		Microsoft::WRL::Callback<ICoreWebView2NavigationCompletedEventHandler>(this, &FWebView2Window::OnNavigationCompletedInternal).Get(),
+		&NavigationCompletedToken);
+
+	WebView->add_NavigationStarting(
+		Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(this, &FWebView2Window::OnNavigationStartingInternal).Get(),
+		&NavigationStartingToken);
+
+	WebView->add_NewWindowRequested(
+		Microsoft::WRL::Callback<ICoreWebView2NewWindowRequestedEventHandler>(this, &FWebView2Window::OnNewWindowRequestedInternal).Get(),
+		&NewWindowRequestedToken);
+
+	WebView->add_HistoryChanged(
+		Microsoft::WRL::Callback<ICoreWebView2HistoryChangedEventHandler>(this, &FWebView2Window::OnHistoryChangedInternal).Get(),
+		&HistoryChangedToken);
+
+	WebView->add_DocumentTitleChanged(
+		Microsoft::WRL::Callback<ICoreWebView2DocumentTitleChangedEventHandler>(this, &FWebView2Window::OnDocumentTitleChangedInternal).Get(),
+		&DocumentTitleChangedToken);
+
+	WebView->add_SourceChanged(
+		Microsoft::WRL::Callback<ICoreWebView2SourceChangedEventHandler>(this, &FWebView2Window::OnSourceChangedInternal).Get(),
+		&SourceChangedToken);
+
+	if (Microsoft::WRL::ComPtr<ICoreWebView2_4> WebView4; SUCCEEDED(WebView.As(&WebView4)) && WebView4)
+	{
+		WebView4->add_DownloadStarting(
+			Microsoft::WRL::Callback<ICoreWebView2DownloadStartingEventHandler>(this, &FWebView2Window::OnDownloadStartingInternal).Get(),
+			&DownloadStartingToken);
+	}
+
+	WebView->add_PermissionRequested(
+		Microsoft::WRL::Callback<ICoreWebView2PermissionRequestedEventHandler>(this, &FWebView2Window::OnPermissionRequestedInternal).Get(),
+		&PermissionRequestedToken);
+
 	Controller->add_AcceleratorKeyPressed(
-		Microsoft::WRL::Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
-		[bHandled](ICoreWebView2Controller* sender, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
-			COREWEBVIEW2_KEY_EVENT_KIND kind;
-			args->get_KeyEventKind(&kind);
-				   // We only care about key down events.
-			if (kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN ||kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN)
-			{
-				args->put_Handled(bHandled);
-			}
-			return S_OK;
-		}).Get(), &MoveFocusRequestedToken);
-}
+		Microsoft::WRL::Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(this, &FWebView2Window::OnAcceleratorKeyPressedInternal).Get(),
+		&AcceleratorKeyPressedToken);
 
-TSharedPtr<FWebView2CompositionHost> FWebView2Window::GetWebView2CompositionHost()
-{
-	return  WebView2CompositionHost;
-}
-
-
-void FWebView2Window::SetContainerVisual(winrt::Windows::UI::Composition::ContainerVisual InWebViewVisual)
-{
-	WebViewVisual=InWebViewVisual;
-}
-
-HRESULT FWebView2Window::OnCreateEnvironmentCompleted(HRESULT Result, ICoreWebView2Environment* Environment)
-{
-	if (Result != S_OK)
+	if (CompositionController)
 	{
-		UE_LOG(LogWebView2,Error,TEXT("Failed to create environment object."));
-		return S_OK;
+		CompositionController->add_CursorChanged(
+			Microsoft::WRL::Callback<ICoreWebView2CursorChangedEventHandler>(this, &FWebView2Window::OnCursorChangedInternal).Get(),
+			&CursorChangedToken);
 	}
-	WebViewEnvironment = Environment;
-	bInitialized = true;
-	return CreateControllerWithOptions();
-
 }
-
-// 这是传递给 CreateCoreWebView2Controller 的回调。在这里我们初始化所有与 WebView 相关的状态，并向 WebView 注册大多数事件处理程序。
-HRESULT FWebView2Window::OnCreateCoreWebView2ControllerCompleted(HRESULT Result, ICoreWebView2Controller* InController)
-{
-	if (Result == S_OK)
-	{
-		Controller = InController;
-		Microsoft::WRL::ComPtr<ICoreWebView2> CoreWebView2;
-		InController->get_CoreWebView2(&CoreWebView2);
-
-		// 我们应该在这里检查是否失败，因为如果此应用使用的 SDK 版本比 Edge 浏览器的安装版本更新，
-		// 则 Edge 浏览器可能不支持最新版本的ICoreWebView2_N 接口。
-
-		//CoreWebView2.query_to(&WebView);
-		CoreWebView2.As(&WebView);
-		// 保存浏览器进程的 PID，该进程为从我们的 CoreWebView2Environment 创建的最后一个 WebView 提供服务。
-		// 我们知道控制器是用 S_OK 创建的，并且它尚未关闭（我们尚未调用 Close，并且尚未引发 ProcessFailed 事件），因此 PID 可用。
-		(WebView->get_BrowserProcessId(&NewestBrowserPID));
-
-		Microsoft::WRL::ComPtr<ICoreWebView2_13>webView2_13;
-		CoreWebView2.As(&webView2_13);
-		if (webView2_13)
-		{
-			Microsoft::WRL::ComPtr<ICoreWebView2Profile> profile;
-			webView2_13->get_Profile(&profile);
-			BOOL inPrivate = false;
-			profile->get_IsInPrivateModeEnabled(&inPrivate);
-
-			UWebView2Settings* Settings=UWebView2Settings::Get();
-			if (!Settings->WebViewCreateOption.DownloadPath.IsEmpty())
-			{
-				profile->put_DefaultDownloadFolderPath(
-					*Settings->WebViewCreateOption.DownloadPath);
-			}
-			
-		}
-
-		auto MessageReceive = Microsoft::WRL::Callback<
-			ICoreWebView2WebMessageReceivedEventHandler>(this, &FWebView2Window::OnMessageReceived);
-		WebView->add_WebMessageReceived(MessageReceive.Get(), &MessageReceiveToken);
-
-		Controller->put_Bounds(WebuiBound);
-		if(Visible==ESlateVisibility::Collapsed ||Visible==ESlateVisibility::Hidden)
-		{
-			Controller->put_IsVisible(false);
-		}
-		else
-		{
-			Controller->put_IsVisible(true);
-		}
-		
-		WebView->Navigate(*InitialURL);
-
-		SetBackgroundColor(BackgroundColor);
-				
-		WebView2CompositionHost = FWebView2Manager::GetInstance()->GetMessageProcess(MainWindow);
-		if(WebView2CompositionHost)
-		{
-			WebView2CompositionHost->CreateWebViewVisual(AsShared());
-			//触发WebView创建完成事件
-			OnWebViewCreated.ExecuteIfBound((bool)WebView2CompositionHost);
-		}
-
-		
-		
-		PutCoreWebView2Settings(UWebView2Settings::Get()->CoreWebView2Settings);
-
-
-		//是否静音
-		Microsoft::WRL::ComPtr<ICoreWebView2_8> Webview2_8;
-		WebView.As(&Webview2_8);
-		Webview2_8->put_IsMuted(UWebView2Settings::Get()->bMuted);
-		
-		auto NewWindowRequestedHandle = Microsoft::WRL::Callback<ICoreWebView2NewWindowRequestedEventHandler>(
-	  this, &FWebView2Window::OnCoreWebView2NewWindowRequestedEventHandler);
-		WebView->add_NewWindowRequested(NewWindowRequestedHandle.Get(), &NewWindowRequestedToken);
-		
-		//绑定开始下载事件
-		WebView.As(&WebView4);
-		auto DownloadStartingHandler = Microsoft::WRL::Callback<ICoreWebView2DownloadStartingEventHandler>(
-			this, &FWebView2Window::OnDownloadStartingEventHandler);
-		WebView4->add_DownloadStarting(DownloadStartingHandler.Get(), &DownloadStartingToken);
-
-		//绑定光标发生变化时的回调
-		auto CursorChangedEventHandler = Microsoft::WRL::Callback<ICoreWebView2CursorChangedEventHandler>(
-			this, &FWebView2Window::OnCursorChangedEventHandler);
-		CompositionController->add_CursorChanged(CursorChangedEventHandler.Get(), &CursorChangedEventHandlerToken);
-
-
-		//捕获webView键盘事件
-		auto AcceleratorKeyPressedEventHandler = Microsoft::WRL::Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
-			this, &FWebView2Window::OnAcceleratorKeyPressedEventHandler);
-		Controller->add_AcceleratorKeyPressed(AcceleratorKeyPressedEventHandler.Get(),
-													 &AcceleratorKeyPressedEventHandlerToken);
-		
-		//绑定网页开始加载时的回调
-		auto NavigationStartingEventHandler = Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
-			this, &FWebView2Window::OnNavigationStartingEventHandler);
-		WebView->add_NavigationStarting(NavigationStartingEventHandler.Get(), &NavigationStartingToken);
-		
-		//绑定网页加载完成时的回调
-		auto NavigationCompletedEventHandler = Microsoft::WRL::Callback<ICoreWebView2NavigationCompletedEventHandler>(
-			this, &FWebView2Window::OnNavigationCompletedEventHandler);
-		WebView->add_NavigationCompleted(NavigationCompletedEventHandler.Get(), &NavigationCompletedToken);
-
-		auto HistoryChangedEventHandler=Microsoft::WRL::Callback<ICoreWebView2HistoryChangedEventHandler>(
-			this, &FWebView2Window::OnHistoryChanged);
-		WebView->add_HistoryChanged(HistoryChangedEventHandler.Get(), &HistoryChangedToken);
-
-		auto DocumentTitleChangedEventHandler =Microsoft::WRL::Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
-			this, &FWebView2Window::OnDocumentTitleChanged);
-		WebView->add_DocumentTitleChanged(DocumentTitleChangedEventHandler.Get(), &DocumentTitleChangedToken);
- 
-		auto SourceChangedEventHandler =Microsoft::WRL::Callback<ICoreWebView2SourceChangedEventHandler>(
-			this, &FWebView2Window::OnSourceChanged);
-		WebView->add_SourceChanged(SourceChangedEventHandler.Get(), &SourceChangedToken);
-
-	}
-
-	return  S_OK;
-}
-
-HRESULT FWebView2Window::OnMessageReceived(ICoreWebView2* Webview, ICoreWebView2WebMessageReceivedEventArgs* Args)
-{
-	LPWSTR MessageRaw;
-	Args->get_WebMessageAsJson(&MessageRaw);
-	std::wstring Message = MessageRaw;
-	OnWebView2MessageReceived.ExecuteIfBound(FString(Message.c_str()));
-
-	UWebView2Subsystem::GetWebView2Subsystem()->OnMessageReceivedNactive.ExecuteIfBound(FString(Message.c_str()));
-	UWebView2Subsystem::GetWebView2Subsystem()->OnWebMessageReceived.Broadcast(FString(Message.c_str()));
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnCoreWebView2NewWindowRequestedEventHandler(ICoreWebView2* Sender,
-	ICoreWebView2NewWindowRequestedEventArgs* Args)
-{
-	LPWSTR URI;
-	Args->get_Uri(&URI);
-	OnNewWindowRequested.ExecuteIfBound(FString(URI));
-	Args->put_Handled(true);
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnNavigationCompletedEventHandler(ICoreWebView2* Sender,
-	ICoreWebView2NavigationCompletedEventArgs* Args)
-{
-	BOOL bSuccess;
-	Args->get_IsSuccess(&bSuccess);
-	OnNavigationCompleted.ExecuteIfBound((bool)bSuccess);
-	if (!bSuccess)
-	{
-		COREWEBVIEW2_WEB_ERROR_STATUS WebErrorStatus;
-		Args->get_WebErrorStatus(&WebErrorStatus);
-
-		if (WebErrorStatus != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED)
-		{
-			UE_LOG(LogWebView2,Error,TEXT("Iframe navigation failed:%d, Navigation Failure"),WebErrorStatus);
-			DocumentState=EWebView2DocumentState::Error;
-		}
-	}
-	else
-	{
-		DocumentState=EWebView2DocumentState::Completed;
-	}
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnNavigationStartingEventHandler(ICoreWebView2* Sender,
-	ICoreWebView2NavigationStartingEventArgs* Args)
-{
-	LPWSTR URI;
-	Args->get_Uri(&URI);
-	OnNavigationStarting.ExecuteIfBound(FString(URI));
-	DocumentState=EWebView2DocumentState::Loading;
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnCursorChangedEventHandler(ICoreWebView2CompositionController* Sender, IUnknown* Args)
-{
-	HCURSOR WebviewCursor;
-	HRESULT Result = Sender->get_Cursor(&WebviewCursor);
-
-	if (FAILED(Result))
-	{
-		return Result;
-	}
-
-	EMouseCursor::Type MouseCursor = EMouseCursor::Default;
-	HCURSOR HANDCursor = LoadCursor(NULL, IDC_HAND);
-	if (WebviewCursor == HANDCursor)
-	{
-		MouseCursor = EMouseCursor::Hand;
-	}
-	HCURSOR hIBeamCursor = LoadCursor(NULL, IDC_IBEAM);
-	if (WebviewCursor == hIBeamCursor)
-	{
-		MouseCursor = EMouseCursor::TextEditBeam;
-	}
-	 OnCursorChangedNactive.ExecuteIfBound(MouseCursor);
-
-	/**
-	if (MouseCursor)
-	{
-		TSharedPtr<ICursor> PlatformCursor = FSlateApplication::Get().GetPlatformCursor();
-
-		if (PlatformCursor.IsValid())
-		{
-			PlatformCursor->SetTypeShape(MouseCursor, (void*)MouseCursor);
-			::SetCursor(WebviewCursor);
-		}
-		return true;
-	}*/
-	return S_OK;
-	
-
-}
-
-HRESULT FWebView2Window::OnAcceleratorKeyPressedEventHandler(ICoreWebView2Controller* Sender,
-	ICoreWebView2AcceleratorKeyPressedEventArgs* Args)
-{
-	COREWEBVIEW2_KEY_EVENT_KIND keyEventKind;
-	Args->get_KeyEventKind(&keyEventKind);
-	UINT key;
-	Args->get_VirtualKey(&key);
-
-	if (keyEventKind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN)
-		PostMessageW(MainWindow, WM_KEYDOWN, key, 0);
-	else if (keyEventKind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP)
-		PostMessageW(MainWindow, WM_KEYUP, key, 0);
-
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnDownloadStartingEventHandler(ICoreWebView2* Sender,
-	ICoreWebView2DownloadStartingEventArgs* Args)
-{
-	 // 获取下载操作的实例
-    Args->get_DownloadOperation(&DownloadOperation);
-    // // 获取下载是否被取消的状态
-    // BOOL cancel = FALSE;
-    // args->get_Cancel(&cancel);
-    // 获取下载的 URL 地址
-	LPWSTR URI;
-    DownloadOperation->get_Uri(&URI);
-	DownloadInfo.URL=URI;
-
-	LPWSTR MiniType;
-	DownloadOperation->get_MimeType(&MiniType);
-	DownloadInfo.MimeType=MiniType;
-
-	LPWSTR ContentDisposition;
-	DownloadOperation->get_ContentDisposition(&ContentDisposition);
-	DownloadInfo.ContentDisposition=ContentDisposition;
-
-	DownloadOperation->get_TotalBytesToReceive(&TotalBytesToReceive);
-
-	// 获取是否处理下载的状态
-	// BOOL handled = FALSE;
-	// args->get_Handled(&handled);
-	//隐藏下载的UI界面
-	Args->put_Handled(true);
-
-	auto ActiveDownloadFunc = [this]()
-	{
-		// 当下载状态发生改变时，定义处理函数
-		DownloadOperation->add_StateChanged(Microsoft::WRL::Callback<ICoreWebView2StateChangedEventHandler>(
-			                                    this, &FWebView2Window::OnDownLoadChangeStateEvent).Get(), &StateChangedToken);
-
-		// 当下载接收字节改变时，定义处理函数
-		DownloadOperation->add_BytesReceivedChanged(
-			Microsoft::WRL::Callback<ICoreWebView2BytesReceivedChangedEventHandler>(
-				this, &FWebView2Window::OnBytesReceivedChanged).Get(), &BytesReceivedChangedToken);
-
-		// 当预估下载结束时间改变时，定义处理函数
-		DownloadOperation->add_EstimatedEndTimeChanged(
-			Microsoft::WRL::Callback<ICoreWebView2EstimatedEndTimeChangedEventHandler>(
-				this, &FWebView2Window::OnEstimatedEndTimeChanged).Get(), &EstimatedEndTimeChanged);
-	};
-
-	ActiveDownloadFunc();
-
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnDownLoadChangeStateEvent(ICoreWebView2DownloadOperation* Sender, IUnknown* Args)
-{
-	if (!DownloadOperation)
-	{
-		return S_FALSE;
-	}
-		
-	if (!OnCursorChangedNactive.IsBound())
-	{
-		return S_OK;
-	}
-		
-	COREWEBVIEW2_DOWNLOAD_STATE State;
-	DownloadOperation->get_State(&State);
-	switch (State)
-	{
-	case COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS:
-		OnDownloadStateChangedNactive.ExecuteIfBound(EWebView2DownloadState::Progress,TEXT("正在下载中。。。"));
-		break;
-	case COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED:
-		{
-			COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON interrupt_reason;
-			DownloadOperation->get_InterruptReason(&interrupt_reason);
-			FString Reasen = InterruptReasonToString(interrupt_reason);
-			OnDownloadStateChangedNactive.ExecuteIfBound(EWebView2DownloadState::Interrupted, Reasen);
-			DownloadOperation->remove_StateChanged(StateChangedToken);
-			DownloadOperation->remove_BytesReceivedChanged(BytesReceivedChangedToken);
-			DownloadOperation->remove_EstimatedEndTimeChanged(EstimatedEndTimeChanged);
-			DownloadOperation = nullptr;
-		}
-		break;
-	case COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED:
-		OnDownloadStateChangedNactive.ExecuteIfBound(EWebView2DownloadState::Completed, TEXT("下载已完成"));
-		DownloadOperation->remove_StateChanged(StateChangedToken);
-		DownloadOperation->remove_BytesReceivedChanged(BytesReceivedChangedToken);
-		DownloadOperation->remove_EstimatedEndTimeChanged(EstimatedEndTimeChanged);
-		break;
-	}
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnBytesReceivedChanged(ICoreWebView2DownloadOperation* Sender, IUnknown* Args)
-{
-	if (!DownloadOperation)
-		return S_FALSE;
-	//获取当前下载的字节数
-	int64 BytesReceived = 0;
-	DownloadOperation->get_BytesReceived(&BytesReceived);
-	//更新下载进度
-	OnDownloadProgressNactive.ExecuteIfBound(BytesReceived, TotalBytesToReceive);
-	
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnEstimatedEndTimeChanged(ICoreWebView2DownloadOperation* Sender, IUnknown* Args)
-{
-	if (!DownloadOperation)
-	{
-		return S_FALSE;
-	}
-		
-	LPWSTR EstimatedEndTime;
-	DownloadOperation->get_EstimatedEndTime(&EstimatedEndTime);
-
-	OnEstimatedDownloadTimeNactive.ExecuteIfBound(EstimatedEndTime);
-	
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnHistoryChanged(ICoreWebView2* Sender, IUnknown* Args)
-{
-	BOOL canGoBack;
-	BOOL canGoForward;
-	Sender->get_CanGoBack(&canGoBack);
-	Sender->get_CanGoForward(&canGoForward);
-	OnCanGoBackNactive.ExecuteIfBound(canGoBack);
-	OnCanGoForwardNactive.ExecuteIfBound(canGoForward);
-	
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnDocumentTitleChanged(ICoreWebView2* Sender, IUnknown* Args)
-{
-	LPWSTR TitleRaw;
-	Sender->get_DocumentTitle(&TitleRaw);
-	std::wstring Title = TitleRaw;
-	OnDocumentTitleChangedNactive.ExecuteIfBound(FString(Title.c_str()));
-
-	return S_OK;
-}
-
-HRESULT FWebView2Window::OnSourceChanged(ICoreWebView2* Sender, ICoreWebView2SourceChangedEventArgs* Args)
-{
-	LPWSTR URIRaw;
-	Sender->get_Source(&URIRaw);
-	std::wstring URI = URIRaw;
-
-	FString RUL=URI.c_str();
-
-	if (RUL.IsEmpty())
-	{
-		RUL=TEXT("about:blank");
-	}
-
-	OnSourceChangedNactive.ExecuteIfBound(RUL);
-	return S_OK;
-}
-
-FString FWebView2Window::InterruptReasonToString(const COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON InterruptReason)
-{
-	FString ReasonString ;
-    switch (InterruptReason)
-    {
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE:
-        ReasonString = TEXT("None");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_FAILED:
-        ReasonString = TEXT("下载失败");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_ACCESS_DENIED:
-        ReasonString = TEXT("文件访问被拒绝");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_NO_SPACE:
-        ReasonString =TEXT("文件没有空间");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_NAME_TOO_LONG:
-        ReasonString = TEXT("文件名太长");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TOO_LARGE:
-        ReasonString = TEXT("文件太大");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_MALICIOUS:
-        ReasonString = TEXT("文件恶意");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TRANSIENT_ERROR:
-        ReasonString =TEXT("文件瞬态错误");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_BLOCKED_BY_POLICY:
-        ReasonString = TEXT("文件被策略阻止");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_SECURITY_CHECK_FAILED:
-        ReasonString = TEXT("文件安全检查失败");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TOO_SHORT:
-        ReasonString = TEXT("文件太短");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_HASH_MISMATCH:
-        ReasonString = TEXT("文件哈希不匹配");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_FAILED:
-        ReasonString =TEXT("网络故障");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_TIMEOUT:
-        ReasonString = TEXT("网络超时");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_DISCONNECTED:
-        ReasonString = TEXT("网络已断开连接");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_SERVER_DOWN:
-        ReasonString = TEXT("网络服务器故障");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_INVALID_REQUEST:
-        ReasonString = TEXT("网络无效请求");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_FAILED:
-        ReasonString = TEXT("服务器失败");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_NO_RANGE:
-        ReasonString = TEXT("服务器无范围");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_BAD_CONTENT:
-        ReasonString = TEXT("服务器内容错误");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNAUTHORIZED:
-        ReasonString = TEXT("服务器未授权");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CERTIFICATE_PROBLEM:
-        ReasonString = TEXT("服务器证书问题");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN:
-        ReasonString = TEXT("服务器被禁止");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNEXPECTED_RESPONSE:
-        ReasonString = TEXT("服务器意外响应");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH:
-        ReasonString = TEXT("服务器内容长度不匹配");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CROSS_ORIGIN_REDIRECT:
-        ReasonString = TEXT("服务器跨源重定向");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED:
-        ReasonString = TEXT("用户已取消");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_SHUTDOWN:
-        ReasonString = TEXT("用户关机");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED:
-        ReasonString = TEXT("用户已暂停");
-        break;
-    case COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_DOWNLOAD_PROCESS_CRASHED:
-        ReasonString = TEXT("下载进程崩溃");
-        break;
-    }
-    return ReasonString;
-}
-
-

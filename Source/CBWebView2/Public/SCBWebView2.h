@@ -1,180 +1,161 @@
-﻿#pragma once
+#pragma once
+
 #include "CoreMinimal.h"
+#include "Widgets/SCompoundWidget.h"
+
 #include "WebView2Window.h"
-#include "Widgets/Input/SEditableTextBox.h"
 
-class SConstraintCanvas;
-DECLARE_DELEGATE_OneParam(FWebView2ScriptCallbackNative, const FString& /*Data*/)
+class SEditableTextBox;
+class SOverlay;
 
-class CBWEBVIEW2_API SCBWebView2:public SCompoundWidget
+DECLARE_DELEGATE_OneParam(FOnCBWebView2ScriptCallback, const FString&)
+
+/**
+ * Slate 层 WebView 控件。
+ *
+ * 它负责：
+ * 1. 在 UE 界面里创建与管理原生 WebView2 宿主。
+ * 2. 把 Slate 输入事件转发给底层 WebView。
+ * 3. 处理地址栏、控制栏和透明穿透这类 UI 逻辑。
+ */
+class CBWEBVIEW2_API SCBWebView2 : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS(SCBWebView2)
-		: _URL(TEXT(""))
-		,_Color(FColor(255,255,255,255))
-		, _ShowTouchArea(false)
-		,_ShowAddressBar(false)
-		, _ShowControls(false)
-		,_SetMouseOpacity(0.f)
-		,_ShowInitialThrobber(false)
-		
+		: _InitialUrl(TEXT("https://www.bing.com"))
+		, _BackgroundColor(FColor(255, 255, 255, 255))
+		, _bShowAddressBar(false)
+		, _bShowControls(false)
+		, _bShowTouchArea(false)
+		, _bEnableTransparencyHitTest(true)
+		, _bShowInitialThrobber(false)
+		, _bInputOnlyOnWeb(false)
 	{
-		
 	}
 
-		/**网页链接*/
-		SLATE_ARGUMENT(FString,URL)
+		// 以下参数对应 UMG 暴露的常用配置。
+		SLATE_ARGUMENT(FString, InitialUrl)
+		SLATE_ARGUMENT(FColor, BackgroundColor)
+		SLATE_ARGUMENT(bool, bShowAddressBar)
+		SLATE_ARGUMENT(bool, bShowControls)
+		SLATE_ARGUMENT(bool, bShowTouchArea)
+		SLATE_ARGUMENT(bool, bEnableTransparencyHitTest)
+		SLATE_ARGUMENT(bool, bShowInitialThrobber)
+		SLATE_ARGUMENT(bool, bInputOnlyOnWeb)
+		SLATE_ARGUMENT(TSharedPtr<SWindow>, ParentWindow)
 
-		/**网页背景颜色*/
-		SLATE_ARGUMENT(FColor,Color)
-		
-		/**是否显示网页可点击区域*/
-		SLATE_ARGUMENT(bool,ShowTouchArea)
-		
-		/** Whether to show an address bar. */
-		SLATE_ARGUMENT(bool, ShowAddressBar)
-
-		/** Whether to show standard controls like Back, Forward, Reload etc. */
-		SLATE_ARGUMENT(bool, ShowControls)
-
-		SLATE_ARGUMENT(float, SetMouseOpacity)
-
-		/** Whether to show a throbber overlay during browser initialization. */
-		SLATE_ARGUMENT(bool, ShowInitialThrobber)
-		
-		
-		SLATE_EVENT(FOnWebView2MessageReceivedNactive,NewOnWebView2MessageReceived)
-		SLATE_EVENT(FOnNavigationCompletedNactive,NewOnWebView2NavigationCompleted)
-		SLATE_EVENT(FOnNavigationStartingNactive,NewOnNavigationStarting)
-		SLATE_EVENT(FOnNewWindowRequestedNactive,NewOnNewWindowRequestedNactive)
-		SLATE_EVENT(FOnCursorChangedNactive,NewOnCursorChangedNactive)
-		SLATE_EVENT(FOnWebViewCreated,NewOnWebViewCreated)
+		SLATE_EVENT(FOnWebView2MessageReceivedNative, OnMessageReceived)
+		SLATE_EVENT(FOnWebView2NavigationCompletedNative, OnNavigationCompleted)
+		SLATE_EVENT(FOnWebView2NavigationStartingNative, OnNavigationStarting)
+		SLATE_EVENT(FOnWebView2NewWindowRequestedNative, OnNewWindowRequested)
+		SLATE_EVENT(FOnWebView2DownloadEventNative, OnDownloadStarting)
+		SLATE_EVENT(FOnWebView2DownloadEventNative, OnDownloadUpdated)
+		SLATE_EVENT(FOnWebView2PrintToPdfCompletedNative, OnPrintToPdfCompleted)
+		SLATE_EVENT(FOnWebView2MonitoredEventNative, OnMonitoredEvent)
+		SLATE_EVENT(FOnWebViewCreatedNative, OnWebViewCreated)
 	SLATE_END_ARGS()
-	
-	SCBWebView2();
-    ~SCBWebView2();
-public:
-	void Construct( const FArguments& InArgs,TSharedRef<SWindow> InParentWindowPtr);
 
+	/** 构建 Slate 层浏览器控件并创建底层原生宿主。 */
+	void Construct(const FArguments& InArgs);
+	virtual ~SCBWebView2() override;
+
+	/** 主动关闭底层 WebView 并释放原生资源。 */
+	void BeginDestroy();
+	/** 执行 JS 脚本。 */
+	void ExecuteScript(const FString& Script, FOnCBWebView2ScriptCallback Callback = FOnCBWebView2ScriptCallback()) const;
+	/** 导航到新的地址。 */
+	void LoadURL(const FString& InUrl);
+	/** 浏览器前进。 */
+	void GoForward() const;
+	/** 浏览器后退。 */
+	void GoBack() const;
+	/** 刷新当前页。 */
+	void Reload() const;
+	/** 停止加载。 */
+	void Stop() const;
+	/** 打开 DevTools。 */
+	void OpenDevToolsWindow() const;
+	/** 将页面打印为 PDF。 */
+	void PrintToPdf(const FString& OutputPath, bool bLandscape = false) const;
+	/** 修改默认背景色。 */
+	void SetBackgroundColor(const FColor& InBackgroundColor);
+	/** 同步设置 Slate 与原生 WebView 的可见性。 */
+	void SetWebViewVisibility(ESlateVisibility InVisibility);
+	/** 获取底层原生可见性状态。 */
+	ESlateVisibility GetWebViewVisibility() const;
+	/** 设置是否将所有输入都传递给网页。 */
+	void SetInputOnlyOnWeb(bool bInputOnly);
+
+	/** 在绘制阶段同步原生 WebView 的位置、尺寸和层级。 */
+	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
+	/** 给 UMG/Slate 布局系统一个默认尺寸。 */
+	virtual FVector2D ComputeDesiredSize(float LayoutScaleMultiplier) const override;
+	/** 预留 Tick 入口，便于后续扩展。 */
+	virtual void Tick(const FGeometry& AllottedGeometry, double InCurrentTime, float InDeltaTime) override;
+
+	/** 以下输入函数把 Slate 事件转成 WebView2 原生输入。 */
 	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
-	virtual void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
-	virtual void OnMouseLeave(const FPointerEvent& MouseEvent) override;
-	virtual bool HasKeyboardFocus() const override;
-	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
-	virtual FVector2D ComputeDesiredSize(float) const override;
-	virtual FCursorReply OnCursorQuery(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent) const override;
+	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseWheel(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnFocusReceived(const FGeometry& MyGeometry, const FFocusEvent& InFocusEvent) override;
+	virtual void OnFocusLost(const FFocusEvent& InFocusEvent) override;
+	virtual bool SupportsKeyboardFocus() const override;
+	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+	virtual FReply OnKeyUp(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+	virtual FReply OnKeyChar(const FGeometry& MyGeometry, const FCharacterEvent& InCharacterEvent) override;
 
-	 void BeginDestroy();
-	 void ExecuteScript(const FString& Script,FWebView2ScriptCallbackNative ScriptCallback=FWebView2ScriptCallbackNative()) const;
-
-public:
-	/**加载网页*/ 
-	void LoadURL(const FString InURL) ;
-	/**前进*/
-	void GoForward() const ;
-	/**后退*/
-	void GoBack() const ;
-
-	/** 如果浏览器可以向后导航则返回 true。 */
-	bool CanGoBack() const;
-
-	/** 如果浏览器可以向前导航，则返回 true。 */
-	bool CanGoForward() const;
-	/**重新加载*/
-	void ReLoad() const ;
-	/**停止加载*/
-	void Stop() const ;
-
-	/** document当前是否正在加载。 */
-	bool IsLoading() const;
-
-	/** 停止加载 */
-	void StopLoad();
-
-	/** 重新加载页面 */
-	void Reload();
-
-	/**获取当前网页标题. */
-	FText GetTitleText() const;
-
-	/**
-	* 获取地址栏中显示的 URL，这可能不是框架中当前加载的 URL。
-	*
-	* @return 地址栏 URL。
-	*/
-	FText GetAddressBarUrlText() const;
-
-	void SetVisible(ESlateVisibility InVisibility);
-
-	ESlateVisibility GetVisible();
-
-	float GetUIOpacityUnderMouse();
 private:
-	/** Navigate backwards. */
-	FReply OnBackClicked();
-
-	/** Navigate forwards. */
-	FReply OnForwardClicked();
-
-	/** Get text for reload button depending on status */
+	/** 工具栏事件和展示辅助函数。 */
+	FReply HandleBackClicked();
+	FReply HandleForwardClicked();
+	FReply HandleReloadClicked();
+	void HandleUrlCommitted(const FText& NewText, ETextCommit::Type CommitType);
 	FText GetReloadButtonText() const;
+	FText GetTitleText() const;
+	FText GetAddressBarUrlText() const;
+	EVisibility GetLoadingIndicatorVisibility() const;
+	FVector2D GetLocalWebViewPoint(const FGeometry& MyGeometry, const FVector2D& ScreenSpacePosition) const;
 
-	/** Reload or stop loading */
-	FReply OnReloadClicked();
+	/** 绑定原生 WebView2 委托到 Slate 与外部事件。 */
+	void BindWebViewEvents();
+	/** 处理来自网页的消息，包括透明区域命中状态消息。 */
+	void HandleMessageFromWeb(const FString& Message);
 
-	/** Invoked whenever text is committed in the address bar. */
-	void OnUrlTextCommitted( const FText& NewText, ETextCommit::Type CommitType );
+	/** 底层原生 WebView 宿主。 */
+	TSharedPtr<FWebView2Window> WebViewWindow;
+	/** 可选地址栏。 */
+	TSharedPtr<SEditableTextBox> AddressBarTextBox;
+	/** WebView 的覆盖层容器。 */
+	TSharedPtr<SOverlay> Overlay;
 
-	/** Get whether loading throbber should be visible */
-	EVisibility GetLoadingThrobberVisibility() const;
-	
-public:
-	FOnWebView2MessageReceivedNactive OnWebView2MessageReceived;
-	FOnNavigationCompletedNactive OnWebView2NavigationCompleted;
-	FOnNavigationStartingNactive OnWebView2NavigationStarting;
-	FOnNewWindowRequestedNactive OnWebView2NewWindowRequested;
-	FOnCursorChangedNactive OnWebView2CursorChangedNactive;
-	FOnWebViewCreated OnWebViewCreated;
-	
-	/** The initial throbber setting */
-	bool bShowInitialThrobber;
-	/**是否显示地址栏*/
-	bool bShowAddressBar;
-	/**是否显示控制栏*/
-	bool bShowControls;
-
-	/**是否线上控制栏*/
-	bool bShowTouchArea;
-	
-	/**鼠标透明度穿透数值*/
-	float MousePenetrationOpacity;
-public:
-	void SetBackgroundColor(FColor InBackgroundColor);
-private:
-	TSharedPtr<FWebView2Window> WebView2Window;
-
-	/** Editable text widget used for an address bar */
-	TSharedPtr< SEditableTextBox > InputText;
-	
-	FString InitializeURL;
+	FString InitialUrl;
+	FString CurrentUrl;
+	FString CurrentTitle;
 	FColor BackgroundColor;
-	FGuid UniqueId;
+	FGuid InstanceId;
+	TWeakPtr<SWindow> ParentWindow;
+	mutable float CurrentSlateScale = 1.0f;
 
-	HWND WebViewWindowHandle;
+	/** 外观与输入行为开关。 */
+	bool bShowAddressBar = false;
+	bool bShowControls = false;
+	bool bShowTouchArea = false;
+	bool bEnableTransparencyHitTest = true;
+	bool bShowInitialThrobber = false;
+	bool bCanGoBack = false;
+	bool bCanGoForward = false;
+	bool bIsHoveringInteractiveContent = true;
+	bool bInputOnlyOnWeb = false;
 
-	FReply Handle;
-
-	bool bCanGoBack =false;
-	bool bCanGoForward =false;
-	FString Title;
-	FString  URL;
-
-	//缩放比
-  mutable  float FixSacale;
-private:
-	TSharedPtr<SConstraintCanvas> Canvas;// 绝对布局容器
-
-	TArray<TSharedPtr<SImage>> Images;
-	TSharedPtr<SOverlay> PositionOverlay; //
+	/** 转发给外部的原生委托集合。 */
+	FOnWebView2MessageReceivedNative OnMessageReceived;
+	FOnWebView2NavigationCompletedNative OnNavigationCompleted;
+	FOnWebView2NavigationStartingNative OnNavigationStarting;
+	FOnWebView2NewWindowRequestedNative OnNewWindowRequested;
+	FOnWebView2DownloadEventNative OnDownloadStarting;
+	FOnWebView2DownloadEventNative OnDownloadUpdated;
+	FOnWebView2PrintToPdfCompletedNative OnPrintToPdfCompleted;
+	FOnWebView2MonitoredEventNative OnMonitoredEvent;
+	FOnWebViewCreatedNative OnWebViewCreated;
 };

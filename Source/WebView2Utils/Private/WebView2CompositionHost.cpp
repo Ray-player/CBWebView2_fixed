@@ -1,270 +1,295 @@
-﻿#include "WebView2CompositionHost.h"
+#include "WebView2CompositionHost.h"
 
 #include "WebView2Log.h"
-#include "WebView2Settings.h"
 #include "WebView2Window.h"
-#include "Components/SlateWrapperTypes.h"
 
-FWebView2CompositionHost::FWebView2CompositionHost(HWND InHwnd, winrt::Windows::System::DispatcherQueueController QueueController)
-	:MDispatcherQueueController(QueueController)
-	,MainHwnd(InHwnd)
-	,ClickLayerID(0)
-	
+namespace
 {
-	UWebView2Settings* Settings=UWebView2Settings::Get();
-
-	if(Settings->WebView2Mode ==EWebView2Mode::VISUAL_WINCOMP)
+	// 鼠标移动消息需要广播给重叠 WebView，用于更新透明穿透状态。
+	bool IsMouseMoveMessage(const UINT Message)
 	{
-		if (QueueController)
-		{
-			MCompositor = winrt::Windows::UI::Composition::Compositor();
-		}
+		return Message == WM_MOUSEMOVE || Message == WM_NCMOUSEMOVE;
+	}
+
+	bool IsMouseButtonDownMessage(const UINT Message)
+	{
+		// 鼠标按下消息会触发输入激活请求。
+		return Message == WM_LBUTTONDOWN || Message == WM_RBUTTONDOWN || Message == WM_MBUTTONDOWN ||
+			Message == WM_NCLBUTTONDOWN || Message == WM_NCRBUTTONDOWN || Message == WM_NCMBUTTONDOWN;
+	}
+}
+
+FWebView2CompositionHost::FWebView2CompositionHost(
+	HWND InWindowHandle,
+	winrt::Windows::System::DispatcherQueueController InDispatcherQueueController)
+	: WindowHandle(InWindowHandle)
+	, DispatcherQueueController(InDispatcherQueueController)
+{
+	if (DispatcherQueueController)
+	{
+		Compositor = winrt::Windows::UI::Composition::Compositor();
 	}
 }
 
 FWebView2CompositionHost::~FWebView2CompositionHost()
 {
-	DestroyWinCompVisualTree();
+	Destroy();
 }
 
 void FWebView2CompositionHost::Initialize()
 {
-	if(MCompositor)
+	if (!Compositor)
 	{
-		CreateDesktopWindowTarget();
-		//跟图元，里面用于放多个webview空间
-		CreateCompositionRoot();
+		return;
 	}
 
+	// 初始化当前宿主窗口的 WinComp 根节点。
+	CreateDesktopTarget();
+	CreateRootVisual();
 }
 
-void FWebView2CompositionHost::CreateWebViewVisual(TSharedRef<FWebView2Window> WebView2Window)
+void FWebView2CompositionHost::AttachWebView(const TSharedRef<FWebView2Window>& WebViewWindow)
 {
-	UE_LOG(LogWebView2,Log,TEXT("WebView2Window is Created"))
-	
-	if(UIVisual )
+	if (!WebViewLayer || !WebViewWindow->CompositionController)
 	{
-		if (WebView2Window->Controller)
+		return;
+	}
+
+	// 每个 WebView 使用独立 ContainerVisual，便于单独定位和排序。
+	winrt::Windows::UI::Composition::ContainerVisual Container = Compositor.CreateContainerVisual();
+	const RECT Bounds = WebViewWindow->GetBounds();
+	Container.Offset({static_cast<float>(Bounds.left), static_cast<float>(Bounds.top), 0.0f});
+	Container.Size({
+		static_cast<float>(Bounds.right - Bounds.left),
+		static_cast<float>(Bounds.bottom - Bounds.top)});
+
+	WebViewLayer.Children().InsertAtTop(Container);
+	WebViewWindow->SetContainerVisual(Container);
+	WebViewWindow->CompositionController->put_RootVisualTarget(Container.as<IUnknown>().get());
+
+	++NextLayerId;
+	WebViewWindow->SetLayerId(NextLayerId);
+	WebViews.Add(WebViewWindow->GetInstanceId().ToString(), WebViewWindow);
+}
+
+void FWebView2CompositionHost::RefreshVisualOrder()
+{
+	if (!WebViewLayer)
+	{
+		return;
+	}
+
+	TMap<int32, TSharedRef<FWebView2Window>> Sorted;
+	for (const TPair<FString, TWeakPtr<FWebView2Window>>& Pair : WebViews)
+	{
+		if (const TSharedPtr<FWebView2Window> WebViewWindow = Pair.Value.Pin())
 		{
-			winrt::Windows::UI::Composition::ContainerVisual NewChild = MCompositor.CreateContainerVisual();
-			UIVisual.Children().InsertAtTop(NewChild);
-			RECT bound = WebView2Window->GetBounds();
-			NewChild.Offset({static_cast<float>(bound.left), static_cast<float>(bound.top), 0});
-			const winrt::Windows::Foundation::Numerics::float2 WebViewSize = {
-				(static_cast<float>(bound.right - bound.left)),
-				(static_cast<float>(bound.bottom - bound.top))
-			};
-			NewChild.Size(WebViewSize);
-			// webViewVisual.CompositeMode()
-			WebView2Window->SetContainerVisual(NewChild);
-			WebView2Window->CompositionController->put_RootVisualTarget(NewChild.as<IUnknown>().get());
-			
-			//每创建一个新的UI，则增加一下层级ID
-			ClickLayerID++;
-			WebView2Window->SetLayerID(ClickLayerID);
+			Sorted.Add(WebViewWindow->GetLayerId(), WebViewWindow.ToSharedRef());
 		}
-		
 	}
 
-	WebViewWindowMap.Add(WebView2Window->GetUniqueID().ToString(),WebView2Window);
-	UE_LOG(LogWebView2,Log,TEXT("WebView2Window is Created"))
-	
+	Sorted.KeySort([](const int32 A, const int32 B)
+	{
+		return A < B;
+	});
+
+	for (const TPair<int32, TSharedRef<FWebView2Window>>& Pair : Sorted)
+	{
+		WebViewLayer.Children().Remove(Pair.Value->WebViewVisual);
+		WebViewLayer.Children().InsertAtTop(Pair.Value->WebViewVisual);
+	}
 }
 
-void FWebView2CompositionHost::RefreshWebViewVisual()
+void FWebView2CompositionHost::DetachWebView(const FGuid& InstanceId, const winrt::Windows::UI::Composition::ContainerVisual& WebViewContainer)
 {
-	if(UIVisual)
+	WebViews.Remove(InstanceId.ToString());
+	if (WebViewLayer && WebViewContainer)
 	{
-		TMap<int32,TSharedRef<FWebView2Window>> LayerWebMap;
-		for(TPair<FString,TSharedRef<FWebView2Window>> &Element:WebViewWindowMap)
+		WebViewLayer.Children().Remove(WebViewContainer);
+	}
+}
+
+void FWebView2CompositionHost::Destroy()
+{
+	for (const TPair<FString, TWeakPtr<FWebView2Window>>& Pair : WebViews)
+	{
+		if (const TSharedPtr<FWebView2Window> WebViewWindow = Pair.Value.Pin())
 		{
-			if(Element.Value.ToSharedPtr().IsValid())
+			if (WebViewLayer && WebViewWindow->WebViewVisual)
 			{
-				LayerWebMap.Add(Element.Value->GetLayerID(),Element.Value);
+				WebViewLayer.Children().Remove(WebViewWindow->WebViewVisual);
 			}
 		}
-
-		LayerWebMap.KeySort([](const int& A, const int& B)
-		{
-			return (A< B);
-		});
-
-		for(TPair<int32,TSharedRef<FWebView2Window>> &Element:LayerWebMap)
-		{
-			UIVisual.Children().Remove(Element.Value->WebViewVisual);
-			UIVisual.Children().InsertAtTop(Element.Value->WebViewVisual);
-		}
 	}
+
+	WebViews.Empty();
+
+	if (RootVisual)
+	{
+		RootVisual.Children().RemoveAll();
+		RootVisual = nullptr;
+	}
+
+	if (WindowTarget)
+	{
+		WindowTarget.Root(nullptr);
+		WindowTarget = nullptr;
+	}
+
+	WebViewLayer = nullptr;
 }
 
-void FWebView2CompositionHost::DestroyWinCompVisualTree()
+bool FWebView2CompositionHost::HandleMouseMessage(UINT Message, WPARAM WParam, LPARAM LParam)
 {
-	if(!WebViewWindowMap.IsEmpty())
+	if (!RootVisual || Message == WM_CLOSE)
 	{
-		for(TPair<FString,TSharedRef<FWebView2Window>> &Element:WebViewWindowMap)
+		return false;
+	}
+
+	// 先计算宿主窗口客户区坐标。
+	POINT Point;
+	POINTSTOPOINT(Point, LParam);
+	if (Message == WM_MOUSEWHEEL || Message == WM_MOUSEHWHEEL || Message == WM_NCRBUTTONDOWN || Message == WM_NCRBUTTONUP)
+	{
+		::ScreenToClient(WindowHandle, &Point);
+	}
+
+	const TArray<TSharedRef<FWebView2Window>> VisibleWebViewsUnderCursor = FindWebViewsAtPoint(Point, false);
+	if (VisibleWebViewsUnderCursor.IsEmpty())
+	{
+		return false;
+	}
+
+	// 只在当前可交互的 WebView 中挑出真正接收点击/滚轮的顶部目标。
+	const TArray<TSharedRef<FWebView2Window>> InteractiveWebViewsUnderCursor = FindWebViewsAtPoint(Point, true);
+
+	TSharedPtr<FWebView2Window> TopMost;
+	for (const TSharedRef<FWebView2Window>& WebViewWindow : InteractiveWebViewsUnderCursor)
+	{
+		if (!TopMost.IsValid() || TopMost->GetLayerId() < WebViewWindow->GetLayerId())
 		{
-			if(Element.Value.ToSharedPtr().IsValid())
+			TopMost = WebViewWindow;
+		}
+	}
+
+	if (IsMouseMoveMessage(Message))
+	{
+		// move 会广播给所有重叠且启用透明命中检测的 WebView，
+		// 这样上层透明后，下层网页也能及时刷新自己的命中状态。
+		for (const TSharedRef<FWebView2Window>& WebViewWindow : VisibleWebViewsUnderCursor)
+		{
+			if (!WebViewWindow->CompositionController || !WebViewWindow->IsTransparencyHitTestEnabled())
 			{
-				if(UIVisual)
-				{
-					UIVisual.Children().Remove(Element.Value->WebViewVisual);
-				
-				}
-				
+				continue;
 			}
+
+			if (TopMost.IsValid() && TopMost->GetInstanceId() == WebViewWindow->GetInstanceId())
+			{
+				continue;
+			}
+
+			POINT LocalPoint = Point;
+			const RECT Bounds = WebViewWindow->GetBounds();
+			LocalPoint.x -= Bounds.left;
+			LocalPoint.y -= Bounds.top;
+
+			WebViewWindow->CompositionController->SendMouseInput(
+				COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+				static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(GET_KEYSTATE_WPARAM(WParam)),
+				0,
+				LocalPoint);
 		}
 	}
-	
-	
-	if (MRootVisual)
-	{
-		MRootVisual.Children().RemoveAll();
-		MRootVisual = nullptr;
 
-		MTarget.Root(nullptr);
-		MTarget = nullptr;
+	if (!TopMost.IsValid() || !TopMost->CompositionController)
+	{
+		return false;
 	}
-	
-}
 
-void FWebView2CompositionHost::DestroyVisualAsWebview(TSharedRef<FWebView2Window> WebView2Window)
-{
-	if(WebView2Window.ToSharedPtr().IsValid())
+	if (IsMouseButtonDownMessage(Message))
 	{
-		WebViewWindowMap.Find(WebView2Window->GetUniqueID().ToString());
-		WebViewWindowMap.Remove(WebView2Window->GetUniqueID().ToString());
+		// 鼠标按下前通知目标 WebView 请求上层 Slate 获取键盘焦点。
+		TopMost->OnInputActivationRequested.ExecuteIfBound();
 	}
-}
 
-HWND FWebView2CompositionHost::GetMainWindowHandle() const
-{
-	return MainHwnd;
-}
-
-bool FWebView2CompositionHost::MouseMessage(UINT Message, WPARAM WParam, LPARAM LParam)
-{
-	 if (!MRootVisual)
-    {
-        return false;
-    }
-    if(Message==WM_CLOSE)
-        return false;
-    
-    POINT point;
-    POINTSTOPOINT(point, LParam);
-    if (Message == WM_MOUSEWHEEL ||
-        Message == WM_MOUSEHWHEEL
-        || Message == WM_NCRBUTTONDOWN || Message == WM_NCRBUTTONUP
-    )
-    {
-        //鼠标滚轮消息以屏幕坐标传递。
-        //SendMouseInput需要WebView的客户端坐标，因此转换
-        //从屏幕到客户端的点。
-        ::ScreenToClient(MainHwnd, &point);
-    }
-
-   TArray<TSharedRef<FWebView2Window>> Focus_UI = FindWebviewFromPoint(point);
-    if (Focus_UI.Num()==0)
-    {
-    	
-    	return false;
-    }
-        
-
-   TSharedPtr<FWebView2Window> TopUI=nullptr;
-    for(auto It = Focus_UI.begin();It!=Focus_UI.end();++It)
-    {
-
-        if(!TopUI)
-        {
-            TopUI = (*It);
-            continue;
-        }
-        if(TopUI->GetLayerID()<(*It)->GetLayerID())
-        {
-            TopUI = (*It);
-        }
-    }
-
-    
-    DWORD MouseData = 0;
-	
-    switch (Message)
-    {
-    case WM_MOUSEWHEEL:
-    case WM_MOUSEHWHEEL:
-        MouseData = GET_WHEEL_DELTA_WPARAM(WParam);
-        break;
-    }
-	
-    if (Message != WM_MOUSELEAVE)
-    {
-        if(TopUI)
-        {
-            RECT AppBounds = TopUI->GetBounds();
-            point.x -= AppBounds.left;
-            point.y -= AppBounds.top;
-        	
-           TopUI->CompositionController->SendMouseInput(
-			static_cast<COREWEBVIEW2_MOUSE_EVENT_KIND>(Message),
-			static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(GET_KEYSTATE_WPARAM(WParam)), MouseData,
-			point);
-        }
-        return true;
-    }
-
-    return false;
-}
-
-void FWebView2CompositionHost::CreateDesktopWindowTarget()
-{
-	namespace abi = ABI::Windows::UI::Composition::Desktop;
-
-	auto interop = MCompositor.as<abi::ICompositorDesktopInterop>();
-	winrt::check_hresult(interop->CreateDesktopWindowTarget(
-		MainHwnd, false, reinterpret_cast<abi::IDesktopWindowTarget**>(winrt::put_abi(MTarget))));
-}
-
-void FWebView2CompositionHost::CreateCompositionRoot()
-{
-	//创建根容器
-	MRootVisual = MCompositor.CreateContainerVisual();
-	MRootVisual.RelativeSizeAdjustment({1.0f, 1.0f});
-	MRootVisual.Offset({0, 0, 0});
-	MTarget.Root(MRootVisual);
-
-	//创建拥于存放2DUI的容器，2DUI的网页容器层级要高于3DUI容器
-	UIVisual = MCompositor.CreateContainerVisual();
-	MRootVisual.Children().InsertAtTop(UIVisual);
-	UIVisual.RelativeSizeAdjustment({1.0f, 1.0f});
-	UIVisual.Offset({0, 0, 0});
-}
-
-TArray<TSharedRef<FWebView2Window>> FWebView2CompositionHost::FindWebviewFromPoint(POINT Point)
-{
-	TArray<TSharedRef<FWebView2Window>> Windows;
-	for(TPair<FString,TSharedRef<FWebView2Window>> &Element:WebViewWindowMap)
+	DWORD MouseData = 0;
+	if (Message == WM_MOUSEWHEEL || Message == WM_MOUSEHWHEEL)
 	{
-		if(!Element.Value.ToSharedPtr())
+		MouseData = GET_WHEEL_DELTA_WPARAM(WParam);
+	}
+
+	RECT Bounds = TopMost->GetBounds();
+	Point.x -= Bounds.left;
+	Point.y -= Bounds.top;
+
+	TopMost->CompositionController->SendMouseInput(
+		static_cast<COREWEBVIEW2_MOUSE_EVENT_KIND>(Message),
+		static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(GET_KEYSTATE_WPARAM(WParam)),
+		MouseData,
+		Point);
+
+	return true;
+}
+
+HWND FWebView2CompositionHost::GetWindowHandle() const
+{
+	return WindowHandle;
+}
+
+void FWebView2CompositionHost::CreateDesktopTarget()
+{
+	namespace DesktopAbi = ABI::Windows::UI::Composition::Desktop;
+	auto Interop = Compositor.as<DesktopAbi::ICompositorDesktopInterop>();
+	winrt::check_hresult(Interop->CreateDesktopWindowTarget(
+		WindowHandle,
+		false,
+		reinterpret_cast<DesktopAbi::IDesktopWindowTarget**>(winrt::put_abi(WindowTarget))));
+}
+
+void FWebView2CompositionHost::CreateRootVisual()
+{
+	RootVisual = Compositor.CreateContainerVisual();
+	RootVisual.RelativeSizeAdjustment({1.0f, 1.0f});
+	WindowTarget.Root(RootVisual);
+
+	WebViewLayer = Compositor.CreateContainerVisual();
+	WebViewLayer.RelativeSizeAdjustment({1.0f, 1.0f});
+	RootVisual.Children().InsertAtTop(WebViewLayer);
+}
+
+TArray<TSharedRef<FWebView2Window>> FWebView2CompositionHost::FindWebViewsAtPoint(const POINT& ClientPoint, bool bRequireHitTestEnabled) const
+{
+	TArray<TSharedRef<FWebView2Window>> Result;
+	for (const TPair<FString, TWeakPtr<FWebView2Window>>& Pair : WebViews)
+	{
+		const TSharedPtr<FWebView2Window> WebViewWindow = Pair.Value.Pin();
+		if (!WebViewWindow.IsValid())
 		{
 			continue;
 		}
-		if(Element.Value->WebViewVisual)
+
+		if (!WebViewWindow->WebViewVisual || WebViewWindow->GetVisible() != ESlateVisibility::Visible)
 		{
-			auto Offset = Element.Value->WebViewVisual.Offset();
-			auto Size = Element.Value->WebViewVisual.Size();
-			if ((Point.x >= Offset.x) && (Point.x < Offset.x + Size.x) && (Point.y >= Offset.y) &&
-				(Point.y < Offset.y + Size.y))
-			{
-				if(Element.Value->GetVisible()==ESlateVisibility::Visible &&Element.Value->bIsMouseOverPositionArea)
-				{
-					Windows.Add(Element.Value);
-				}
-				
-			}
-			
+			continue;
+		}
+
+		if (bRequireHitTestEnabled && !WebViewWindow->IsHitTestEnabled())
+		{
+			// 透明区域已声明不可命中时，不参与点击目标竞争。
+			continue;
+		}
+
+		auto Offset = WebViewWindow->WebViewVisual.Offset();
+		auto Size = WebViewWindow->WebViewVisual.Size();
+		if (
+			ClientPoint.x >= Offset.x &&
+			ClientPoint.x < Offset.x + Size.x &&
+			ClientPoint.y >= Offset.y &&
+			ClientPoint.y < Offset.y + Size.y)
+		{
+			Result.Add(WebViewWindow.ToSharedRef());
 		}
 	}
 
-	return Windows;
+	return Result;
 }

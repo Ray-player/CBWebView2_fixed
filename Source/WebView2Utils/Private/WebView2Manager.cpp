@@ -1,160 +1,157 @@
-﻿#include "WebView2Manager.h"
+#include "WebView2Manager.h"
 
-
+#include "WebView2CompositionHost.h"
+#include "WebView2Log.h"
+#include "WebView2Settings.h"
+#include "WebView2Window.h"
 
 #include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
-#include "Windows/AllowWindowsPlatformAtomics.h"
-
 #include <DispatcherQueue.h>
-
-#include "Windows/HideWindowsPlatformAtomics.h"
 #include "Windows/HideWindowsPlatformTypes.h"
-#include "WebView2Settings.h"
-#include "WebView2CompositionHost.h"
-#include "WebView2Log.h"
-FWebView2Manager* FWebView2Manager::WebView2ManagerInstance = nullptr;
 
-namespace winSystem = winrt::Windows::System;
-
-FWebView2Manager::FWebView2Manager()
-	
+FWebView2Manager& FWebView2Manager::Get()
 {
-	
+	static FWebView2Manager Instance;
+	return Instance;
 }
 
-FWebView2Manager* FWebView2Manager::GetInstance()
+void FWebView2Manager::Initialize()
 {
-	if(!WebView2ManagerInstance)
-	{
-		WebView2ManagerInstance = new FWebView2Manager;
-		WebView2ManagerInstance->Init();
-	}
-	return WebView2ManagerInstance;
-}
-
-void FWebView2Manager::Init()
-{
-	UWebView2Settings* Settings=UWebView2Settings::Get();
-
-	if(Settings->WebView2Mode ==EWebView2Mode::VISUAL_WINCOMP)
-	{
-		
-		HRESULT Hresult = S_OK;
-
-		if (DispatcherQueueController == nullptr)
-		{
-			Hresult = E_FAIL;
-			static decltype(::CreateDispatcherQueueController)* fnCreateDispatcherQueueController =
-				nullptr;
-			if (fnCreateDispatcherQueueController == nullptr)
-			{
-				HMODULE hmod = ::LoadLibraryEx(L"CoreMessaging.dll", nullptr, 0);
-				if (hmod != nullptr)
-				{
-					fnCreateDispatcherQueueController =
-						reinterpret_cast<decltype(::CreateDispatcherQueueController)*>(
-							::GetProcAddress(hmod, "CreateDispatcherQueueController"));
-				}
-			}
-			if (fnCreateDispatcherQueueController != nullptr)
-			{
-				winSystem::DispatcherQueueController controller{nullptr};
-				DispatcherQueueOptions options{
-					sizeof(DispatcherQueueOptions), DQTYPE_THREAD_CURRENT, DQTAT_COM_STA};
-				Hresult = fnCreateDispatcherQueueController(
-					options, reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(
-								 winrt::put_abi(controller)));
-				DispatcherQueueController = controller;
-			}
-		}
-
-		if (!SUCCEEDED(Hresult))
-		{
-			UE_LOG(LogWebView2,Error,TEXT("Create with Windowless WinComp Visual Failed:"
-								 "WinComp compositor creation failed."
-								 "Current OS may not support WinComp."))
-			return;
-		}
-	}
-	
-}
-
-TSharedPtr<FWebView2Window> FWebView2Manager::CreateWebview(HWND InHwnd,const FGuid UniqueID, const FString URL,FColor InBackgroundColor)
-{
-	TSharedPtr<FWebView2Window> WebView2Window = MakeShared<FWebView2Window>(InHwnd,UniqueID,URL,InBackgroundColor);
-	return WebView2Window;
-}
-
-TSharedPtr<FWebView2CompositionHost> FWebView2Manager::GetMessageProcess(HWND Hwnd)
-{
-	if(WebView2CompositionHostMap.Contains(Hwnd))
-	{
-		if( WebView2CompositionHostMap.Find(Hwnd)->Pin())
-		{
-			return WebView2CompositionHostMap.Find(Hwnd)->Pin();
-		}
-	}
-
-	TSharedPtr<FWebView2CompositionHost> WebView2CompositionHost=MakeShared<FWebView2CompositionHost>(Hwnd,DispatcherQueueController);
-	WebView2CompositionHost->Initialize();
-	WebView2CompositionHostMap.Add(Hwnd,WebView2CompositionHost);
-	return WebView2CompositionHost;
-}
-
-bool FWebView2Manager::HandleWindowMessage(HWND Hwnd, UINT Message, WPARAM WParam, LPARAM LParam)
-{
-	if (WebView2CompositionHostMap.Num() == 0)
-	{
-		return false;
-	}
-		
-	for(TPair<HWND,TWeakPtr<FWebView2CompositionHost>>& WebView2CompositionHost: WebView2CompositionHostMap)
-	{
-		if(WebView2CompositionHost.Value.IsValid() &&Hwnd==WebView2CompositionHost.Key)
-		{
-			WebView2CompositionHost.Value.Pin()->MouseMessage(Message,WParam,LParam);
-		}
-	}
-
-	return false;
-}
-
-
-void FWebView2Manager::Shutdown()
-{
-	for(TPair<HWND,TWeakPtr<FWebView2CompositionHost>> &It:WebView2CompositionHostMap)
-	{
-		if (It.Value.Pin())
-		{
-			It.Value.Pin()->DestroyWinCompVisualTree();
-		}
-		
-	}
-	
-	WebView2CompositionHostMap.Empty();
-	
-	if(WebView2ManagerInstance)
-	{
-		delete WebView2ManagerInstance;
-		WebView2ManagerInstance = nullptr;
-	}
-}
-
-void FWebView2Manager::Closed(HWND Hwnd)
-{
-	if(!Hwnd)
+	if (bInitialized)
 	{
 		return;
 	}
-	
-	if(WebView2CompositionHostMap.Contains(Hwnd))
+
+	// 只初始化一次，避免重复创建 DispatcherQueue。
+	bInitialized = true;
+	const UWebView2Settings* Settings = UWebView2Settings::Get();
+	if (Settings && Settings->Mode == ECBWebView2Mode::VisualWinComp)
 	{
-		if(WebView2CompositionHostMap.Find(Hwnd)->Pin())
-		{
-			WebView2CompositionHostMap.Find(Hwnd)->Pin()->DestroyWinCompVisualTree();
-		}
-		
+		// WinComp 模式必须依赖 DispatcherQueue。
+		EnsureDispatcherQueue();
 	}
-	WebView2CompositionHostMap.Remove(Hwnd);
+}
+
+void FWebView2Manager::Shutdown()
+{
+	// 全量销毁宿主，确保编辑器退出或 PIE 切换时不残留原生资源。
+	for (TPair<HWND, TWeakPtr<FWebView2CompositionHost>>& Pair : CompositionHosts)
+	{
+		if (const TSharedPtr<FWebView2CompositionHost> Host = Pair.Value.Pin())
+		{
+			Host->Destroy();
+		}
+	}
+
+	CompositionHosts.Empty();
+	DispatcherQueueController = nullptr;
+	bInitialized = false;
+}
+
+TSharedPtr<FWebView2Window> FWebView2Manager::CreateWebView(
+	HWND ParentWindow,
+	const FGuid& InstanceId,
+	const FString& InitialUrl,
+	const FColor& BackgroundColor,
+	bool bEnableTransparencyHitTest)
+{
+	Initialize();
+	return MakeShared<FWebView2Window>(ParentWindow, InstanceId, InitialUrl, BackgroundColor, bEnableTransparencyHitTest);
+}
+
+TSharedPtr<FWebView2CompositionHost> FWebView2Manager::GetOrCreateCompositionHost(HWND WindowHandle)
+{
+	if (const TWeakPtr<FWebView2CompositionHost>* Existing = CompositionHosts.Find(WindowHandle))
+	{
+		if (const TSharedPtr<FWebView2CompositionHost> Host = Existing->Pin())
+		{
+			return Host;
+		}
+	}
+
+	TSharedPtr<FWebView2CompositionHost> Host = MakeShared<FWebView2CompositionHost>(
+		WindowHandle,
+		DispatcherQueueController);
+	Host->Initialize();
+	CompositionHosts.Add(WindowHandle, Host);
+	return Host;
+}
+
+bool FWebView2Manager::HandleWindowMessage(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM LParam)
+{
+	// 只把消息路由给当前宿主 HWND 对应的 CompositionHost。
+	bool bHandled = false;
+	for (TPair<HWND, TWeakPtr<FWebView2CompositionHost>>& Pair : CompositionHosts)
+	{
+		if (Pair.Key != WindowHandle)
+		{
+			continue;
+		}
+
+		if (const TSharedPtr<FWebView2CompositionHost> Host = Pair.Value.Pin())
+		{
+			bHandled |= Host->HandleMouseMessage(Message, WParam, LParam);
+		}
+	}
+
+	return bHandled;
+}
+
+void FWebView2Manager::OnHostWindowClosed(HWND WindowHandle)
+{
+	if (const TWeakPtr<FWebView2CompositionHost>* Existing = CompositionHosts.Find(WindowHandle))
+	{
+		if (const TSharedPtr<FWebView2CompositionHost> Host = Existing->Pin())
+		{
+			Host->Destroy();
+		}
+	}
+
+	CompositionHosts.Remove(WindowHandle);
+}
+
+bool FWebView2Manager::EnsureDispatcherQueue()
+{
+	if (DispatcherQueueController != nullptr)
+	{
+		return true;
+	}
+
+	// CoreMessaging.dll 中的 CreateDispatcherQueueController 是运行时按需加载的。
+	static decltype(::CreateDispatcherQueueController)* CreateDispatcherQueueControllerFunc = nullptr;
+	if (!CreateDispatcherQueueControllerFunc)
+	{
+		if (HMODULE ModuleHandle = ::LoadLibraryEx(L"CoreMessaging.dll", nullptr, 0))
+		{
+			CreateDispatcherQueueControllerFunc =
+				reinterpret_cast<decltype(::CreateDispatcherQueueController)*>(
+					::GetProcAddress(ModuleHandle, "CreateDispatcherQueueController"));
+		}
+	}
+
+	if (!CreateDispatcherQueueControllerFunc)
+	{
+		UE_LOG(LogWebView2Utils, Error, TEXT("无法创建 DispatcherQueueController，系统可能不支持 WinComp。"));
+		return false;
+	}
+
+	winrt::Windows::System::DispatcherQueueController NewController{nullptr};
+	DispatcherQueueOptions Options{
+		sizeof(DispatcherQueueOptions),
+		DQTYPE_THREAD_CURRENT,
+		DQTAT_COM_STA};
+
+	const HRESULT Hr = CreateDispatcherQueueControllerFunc(
+		Options,
+		reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(NewController)));
+
+	if (FAILED(Hr))
+	{
+		UE_LOG(LogWebView2Utils, Error, TEXT("创建 DispatcherQueueController 失败，HRESULT=0x%08x"), Hr);
+		return false;
+	}
+
+	DispatcherQueueController = NewController;
+	return true;
 }
