@@ -8,7 +8,12 @@ public class CBWebView2 : ModuleRules
 	{
 		// 使用显式或共享 PCH，保持与 UE 常规模块一致。
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-
+		bEnableExceptions = true;
+#if UE_5_7_OR_LATER
+		CppCompileWarningSettings.UndefinedIdentifierWarningLevel = WarningLevel.Off;
+#else
+		bEnableUndefinedIdentifierWarnings = false;
+#endif
 		// 对外暴露给本模块头文件使用的依赖。
 		PublicDependencyModuleNames.AddRange(
 			new[]
