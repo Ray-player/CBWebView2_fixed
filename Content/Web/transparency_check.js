@@ -274,9 +274,9 @@
         }
 
         lastClickable = isClickable;
-        if (window.chrome && window.chrome.webview) {
-            window.chrome.webview.postMessage('IsClickable:' + (isClickable ? '1' : '0'));
-        }
+        // if (window.chrome && window.chrome.webview) {
+        //     window.chrome.webview.postMessage('IsClickable:' + (isClickable ? '1' : '0'));
+        // }
     }
 
     function getBooleanAttribute(el, attrName) {
