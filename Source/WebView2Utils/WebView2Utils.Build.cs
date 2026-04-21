@@ -35,7 +35,8 @@ public class WebView2Utils : ModuleRules
 				"SlateCore",
 				"InputCore",
 				"ApplicationCore",
-				"Projects"
+				"Projects",
+				"UMG"
 			});
 
 		if (Target.Type == TargetType.Editor)
