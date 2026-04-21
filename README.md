@@ -4,10 +4,10 @@
 
 CBWebView2是一个基于Microsoft WebView2技术的Unreal Engine插件，允许在游戏或应用中嵌入Web内容。该插件提供了在UE界面中显示网页、与网页交互以及控制WebView2浏览器实例的功能。
 
-插件名称：CBWebView2 fixed
-插件版本：2.1
-支持平台：Windows 64位 (Win64)
-UE5版本：5.2-5.7(蓝图基于5.5,其他版本请参考最小实现)  
+插件名称：CBWebView2 fixed  
+插件版本：2.1  
+支持平台：Windows 64位 (Win64)  
+UE5版本：5.2-5.7(蓝图基于5.5,其他版本请参考最小实现)    
 
 ## 源代码目录结构
 
