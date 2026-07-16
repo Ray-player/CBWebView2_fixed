@@ -11,11 +11,7 @@ public class WebView2Utils : ModuleRules
 		CppStandard = CppStandardVersion.Cpp20;
 		bEnableExceptions = true;
 		bUseUnity = false;
-#if UE_5_7_OR_LATER
 		CppCompileWarningSettings.UndefinedIdentifierWarningLevel = WarningLevel.Off;
-#else
-		bEnableUndefinedIdentifierWarnings = false;
-#endif
 
 		PublicDefinitions.Add("USING_COROUTINES=1");
 		PublicDefinitions.Add("WINVER=0x0A00");
@@ -25,7 +21,6 @@ public class WebView2Utils : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new[]
 			{
-				"UMG",
 				"Core",
 				"WebView2",
 				"DeveloperSettings"

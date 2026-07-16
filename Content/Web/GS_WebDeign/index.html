@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地下工程数字化平台</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 头部导航栏 -->
+        <header class="header">
+            <div class="header-bg"></div>
+            
+            <div class="header-content">
+                <!-- 左侧导航 -->
+                <nav class="nav-group left-nav">
+                    <a href="#" class="nav-item active">
+                        <span class="nav-text">项目总览</span>
+                        <div class="nav-glow"></div>
+                    </a>
+                    <a href="#" class="nav-item">
+                        <span class="nav-text">工程概况</span>
+                        <div class="nav-glow"></div>
+                    </a>
+                    <a href="#" class="nav-item">
+                        <span class="nav-text">数据中心</span>
+                        <div class="nav-glow"></div>
+                    </a>
+                </nav>
+
+                <!-- 中间标题 -->
+                <div class="center-title-container">
+                    <div class="title-light-effects">
+                        <div class="light-glow primary"></div>
+                        <div class="light-glow secondary"></div>
+                        <!-- 装饰光点 -->
+                        <div class="particle p1"></div>
+                        <div class="particle p2"></div>
+                        <div class="particle p3"></div>
+                    </div>
+                    <h1 class="main-title">地下工程数字化平台</h1>
+                    <div class="title-underline"></div>
+                </div>
+
+                <!-- 右侧导航 -->
+                <nav class="nav-group right-nav">
+                    <a href="#" class="nav-item">
+                        <span class="nav-text">设备管理</span>
+                        <div class="nav-glow"></div>
+                    </a>
+                    <a href="#" class="nav-item">
+                        <span class="nav-text">安全监控</span>
+                        <div class="nav-glow"></div>
+                    </a>
+                    <a href="#" class="nav-item">
+                        <span class="nav-text">系统设置</span>
+                        <div class="nav-glow"></div>
+                    </a>
+                </nav>
+            </div>
+            
+            <!-- 底部装饰线 -->
+            <div class="header-bottom-line"></div>
+        </header>
+
+        <!-- 主体内容区 -->
+        <main class="main-content">
+            <div class="content-overlay">
+                <div class="scan-line"></div>
+                <div class="grid-overlay"></div>
+            </div>
+            
+
+        </main>
+    </div>
+    
+    <script>
+        // 简单的导航交互逻辑
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', function(e) {
+                e.preventDefault();
+                // 移除同一侧的active状态
+                const group = this.closest('.nav-group');
+                group.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+                // 添加当前项的active状态
+                this.classList.add('active');
+            });
+        });
+    </script>
+</body>
+</html>

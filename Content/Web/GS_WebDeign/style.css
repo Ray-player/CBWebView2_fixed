@@ -1,0 +1,349 @@
+@font-face {
+    font-family: 'PangMenZhengDao';
+    src: url('Assets/PANGMEN.TTF') format('truetype');
+    font-weight: normal;
+    font-style: normal;
+}
+
+:root {
+    --primary-blue: #75C8FF;
+    --dark-blue: #0A1929;
+    --text-glow: rgba(117, 200, 255, 0.8);
+    --bg-color: #050E17;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background-color: transparent;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'PangMenZhengDao', 'Microsoft YaHei', sans-serif;
+    color: #ffffff;
+}
+
+.app-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+/* =========================================
+   HEADER SECTION
+========================================= */
+.header {
+    position: relative;
+    width: 100%;
+    height: 93px;
+    flex-shrink: 0;
+    z-index: 100;
+}
+
+.header-bg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image: url('Assets/T_标题栏背景.png');
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+    background-position: top center;
+    filter: drop-shadow(0px 4px 4px rgba(0, 0, 0, 0.25));
+    z-index: 0;
+}
+
+.header-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    height: 100%;
+    position: relative;
+    z-index: 1;
+}
+
+/* =========================================
+   CENTER TITLE
+========================================= */
+.center-title-container {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+}
+
+.main-title {
+    font-size: 52px;
+    font-weight: 400;
+    letter-spacing: 0.16em;
+    line-height: 1.2;
+    text-align: center;
+    white-space: nowrap;
+    
+    /* Complex Gradient Fill */
+    background: linear-gradient(0deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.5)), 
+                linear-gradient(180deg, #FFFFFF 32.78%, #75C8FF 78.3%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    
+    /* Drop shadow via filter since text-shadow interferes with background-clip text */
+    filter: drop-shadow(0px 5px 1px rgba(0, 0, 0, 0.25)) drop-shadow(0 0 15px rgba(117, 200, 255, 0.5));
+    animation: title-pulse 3s infinite alternate ease-in-out;
+}
+
+@keyframes title-pulse {
+    0% { filter: drop-shadow(0px 5px 1px rgba(0, 0, 0, 0.25)) drop-shadow(0 0 10px rgba(117, 200, 255, 0.3)); }
+    100% { filter: drop-shadow(0px 5px 1px rgba(0, 0, 0, 0.25)) drop-shadow(0 0 25px rgba(117, 200, 255, 0.7)); transform: scale(1.02); }
+}
+
+.title-light-effects {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: -1;
+}
+
+.light-glow {
+    position: absolute;
+    border-radius: 50%;
+    mix-blend-mode: plus-lighter;
+    filter: blur(20px);
+}
+
+.light-glow.primary {
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 300px;
+    height: 60px;
+    background: radial-gradient(ellipse at center, rgba(155, 208, 255, 0.6) 0%, transparent 70%);
+}
+
+.light-glow.secondary {
+    top: 30%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 400px;
+    height: 40px;
+    background: radial-gradient(ellipse at center, rgba(117, 200, 255, 0.4) 0%, transparent 70%);
+    animation: width-pulse 4s infinite alternate;
+}
+
+@keyframes width-pulse {
+    0% { width: 300px; opacity: 0.5; }
+    100% { width: 500px; opacity: 1; }
+}
+
+.particle {
+    position: absolute;
+    width: 4px;
+    height: 4px;
+    background-color: #fff;
+    border-radius: 50%;
+    box-shadow: 0 0 8px 2px var(--primary-blue);
+    opacity: 0;
+}
+
+.particle.p1 { left: 10%; top: 20%; animation: particle-blink 3s infinite 0.5s; }
+.particle.p2 { right: 15%; top: 30%; animation: particle-blink 4s infinite 1.2s; }
+.particle.p3 { left: 40%; bottom: 10%; animation: particle-blink 2.5s infinite 0.1s; }
+
+@keyframes particle-blink {
+    0%, 100% { opacity: 0; transform: scale(0.5); }
+    50% { opacity: 1; transform: scale(1.5); }
+}
+
+/* =========================================
+   NAVIGATION
+========================================= */
+.nav-group {
+    display: flex;
+    gap: 16px;
+    flex: 1;
+    z-index: 5;
+    padding-top: 20px; /* Slight offset for vertical alignment */
+}
+
+.left-nav {
+    justify-content: flex-start;
+    padding-left: 8px;
+}
+
+.right-nav {
+    justify-content: flex-end;
+    padding-right: 8px;
+}
+
+.nav-item {
+    position: relative;
+    width: 148px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    transition: transform 0.3s ease, background-image 0.3s ease;
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+    background-position: center;
+    cursor: pointer;
+}
+
+.nav-item:hover {
+    transform: scale(1.025);
+}
+
+/* Left Buttons setup */
+.left-nav .nav-item,
+.left-nav .nav-item:hover{
+    background-image: url('Assets/T_按钮常态.png');
+}
+.left-nav .nav-item.active {
+    background-image: url('Assets/T_按钮选中.png');
+}
+
+/* Right Buttons setup */
+.right-nav .nav-item {
+    background-image: url('Assets/T_按钮常态右.png');
+}
+.right-nav .nav-item:hover,
+.right-nav .nav-item.active {
+    background-image: url('Assets/T_按钮选中右.png');
+}
+
+.nav-text {
+    font-size: 22px;
+    letter-spacing: 0.12em;
+    color: rgba(255, 255, 255, 0.75);
+    z-index: 2;
+    transition: all 0.3s ease;
+    transform: translateY(-2px);
+}
+
+/* Active and Hover text styles */
+.nav-item:hover .nav-text,
+.nav-item.active .nav-text {
+    color: #FFFFFF;
+    text-shadow: 0 0 10px var(--text-glow), 0 0 20px var(--text-glow);
+}
+
+/* Nav Glow Underline (for active states) */
+.nav-glow {
+    position: absolute;
+    bottom: 4px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 2px;
+    background: var(--primary-blue);
+    box-shadow: 0 0 8px var(--primary-blue);
+    transition: width 0.3s ease;
+}
+
+.nav-item.active .nav-glow {
+    width: 40%;
+}
+
+/* =========================================
+   MAIN CONTENT AREA
+========================================= */
+.main-content {
+    flex: 1;
+    position: relative;
+    padding: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+}
+
+.content-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 1;
+}
+
+
+
+/* =========================================
+   RESPONSIVE LAYOUT UPDATES
+========================================= */
+@media screen and (max-width: 1600px) {
+    .main-title {
+        font-size: 44px;
+    }
+    .nav-item {
+        width: 130px;
+        height: 36px;
+    }
+    .nav-text {
+        font-size: 20px;
+    }
+}
+
+@media screen and (max-width: 1366px) {
+    .main-title {
+        font-size: 38px;
+    }
+    .nav-item {
+        width: 120px;
+        height: 32px;
+    }
+    .nav-text {
+        font-size: 18px;
+    }
+    .header {
+        height: 80px;
+    }
+}
+
+@media screen and (max-width: 1024px) {
+    .main-title {
+        font-size: 30px;
+    }
+    .nav-group {
+        gap: 8px;
+    }
+    .nav-item {
+        width: 100px;
+        height: 28px;
+    }
+    .nav-text {
+        font-size: 16px;
+    }
+    .header {
+        height: 70px;
+    }
+}
+
+@media screen and (max-width: 768px) {
+    /* Hide some navigation on very small screens or switch to hamburger */
+    .nav-group.left-nav .nav-item:nth-child(3),
+    .nav-group.right-nav .nav-item:nth-child(3) {
+        display: none;
+    }
+    .main-title {
+        font-size: 24px;
+        letter-spacing: 0.1em;
+    }
+    .header {
+        height: 60px;
+    }
+}
